@@ -557,3 +557,231 @@ pub fn mcp_validate(state: State<'_, Store>) -> Result<McpOverviewPayload, Strin
     })?;
     Ok(McpOverviewPayload { items, drift })
 }
+
+// ─── 连接测试（真实握手） ───
+
+#[derive(Debug, Serialize, Clone)]
+pub struct McpTestResult {
+    pub ok: bool,
+    pub message: String,
+    pub latency_ms: u64,
+}
+
+/// npx 首次拉包可能较慢，给足超时
+const MCP_TEST_TIMEOUT_SECS: u64 = 60;
+
+fn initialize_request() -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": { "name": "agenthub", "version": env!("CARGO_PKG_VERSION") }
+        }
+    })
+}
+
+/// stdio：起进程 → stdin 写 initialize → 逐行读 stdout 等 id=1 响应（带总超时）
+fn test_stdio(s: &McpServer) -> McpTestResult {
+    use std::io::{BufRead, Read, Write};
+    use std::process::{Command, Stdio};
+    use std::sync::mpsc;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    let tail_of = |buf: &str| {
+        let chars: Vec<char> = buf.chars().collect();
+        let start = chars.len().saturating_sub(200);
+        let tail: String = chars[start..].iter().collect();
+        if start > 0 { format!("…{tail}") } else { tail }
+    };
+
+    let start = Instant::now();
+    let fail = |msg: String| McpTestResult {
+        ok: false,
+        latency_ms: start.elapsed().as_millis() as u64,
+        message: msg,
+    };
+    let Some(cmd) = s.command.as_deref() else {
+        return fail("stdio 类型缺少 command".into());
+    };
+
+    let mut child = match Command::new(cmd)
+        .args(&s.args)
+        .envs(s.env.iter())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => return fail(format!("进程启动失败（{cmd}）：{e}")),
+    };
+
+    // stderr 后台收集（失败时给出根因摘要，最多留 4KB）
+    let stderr_buf = Arc::new(Mutex::new(String::new()));
+    if let Some(stderr) = child.stderr.take() {
+        let sink = Arc::clone(&stderr_buf);
+        std::thread::spawn(move || {
+            let mut v = Vec::new();
+            let _ = std::io::Read::take(stderr, 4096).read_to_end(&mut v);
+            *sink.lock().unwrap_or_else(|e| e.into_inner()) =
+                String::from_utf8_lossy(&v).into_owned();
+        });
+    }
+
+    // stdout 后台逐行读 → channel（read 本身阻塞，超时由主循环 recv_timeout 控制）
+    let (tx, rx) = mpsc::channel::<String>();
+    if let Some(stdout) = child.stdout.take() {
+        std::thread::spawn(move || {
+            let reader = std::io::BufReader::new(stdout);
+            for line in reader.lines().map_while(Result::ok) {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
+    // 写 initialize（换行分隔 JSON，与主流 SDK stdio 帧一致）
+    // stdin 保留到函数结束（提前关闭会导致部分 server 立即退出）
+    let mut stdin = child.stdin.take();
+    if let Some(si) = stdin.as_mut() {
+        let req = format!("{}\n", initialize_request());
+        if let Err(e) = si.write_all(req.as_bytes()).and_then(|_| si.flush()) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return fail(format!("initialize 写入失败：{e}"));
+        }
+    }
+
+    let deadline = start + Duration::from_secs(MCP_TEST_TIMEOUT_SECS);
+    let stderr_tail = || {
+        let buf = stderr_buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if buf.is_empty() { String::new() } else { format!(" · stderr：{}", tail_of(&buf)) }
+    };
+    let mut result: Option<McpTestResult> = None;
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            result = Some(fail(format!(
+                "超时（{MCP_TEST_TIMEOUT_SECS}s 内无有效 initialize 响应）{}",
+                stderr_tail()
+            )));
+            break;
+        }
+        match rx.recv_timeout(deadline - now) {
+            Ok(line) => {
+                let Ok(v) = serde_json::from_str::<Value>(&line) else {
+                    continue;
+                };
+                if v.get("id").and_then(Value::as_i64) != Some(1) {
+                    continue;
+                }
+                if let Some(err) = v.get("error") {
+                    result = Some(fail(format!("server 返回错误：{err}")));
+                    break;
+                }
+                if let Some(res) = v.get("result") {
+                    let name = res["serverInfo"]["name"].as_str().unwrap_or("-");
+                    let ver = res["serverInfo"]["version"].as_str().unwrap_or("-");
+                    result = Some(McpTestResult {
+                        ok: true,
+                        latency_ms: start.elapsed().as_millis() as u64,
+                        message: format!("握手成功 · serverInfo {name} {ver}"),
+                    });
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                result = Some(fail(format!(
+                    "超时（{MCP_TEST_TIMEOUT_SECS}s 内无有效 initialize 响应）{}",
+                    stderr_tail()
+                )));
+                break;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                let tail = stderr_buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                result = Some(fail(if tail.is_empty() {
+                    "进程提前退出且无任何输出（检查 command/args 是否指向存在的可执行文件）".into()
+                } else {
+                    format!("进程提前退出 · stderr：{}", tail_of(&tail))
+                }));
+                break;
+            }
+        }
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+    result.unwrap_or_else(|| fail("未知错误".into()))
+}
+
+/// streamableHttp：POST initialize，2xx 即通
+fn test_http(s: &McpServer) -> McpTestResult {
+    use std::time::{Duration, Instant};
+
+    let start = Instant::now();
+    let fail = |msg: String| McpTestResult {
+        ok: false,
+        latency_ms: start.elapsed().as_millis() as u64,
+        message: msg,
+    };
+    let Some(url) = s.url.as_deref() else {
+        return fail("streamableHttp 类型缺少 url".into());
+    };
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return fail(format!("HTTP client 构建失败：{e}")),
+    };
+    let mut req = client
+        .post(url)
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream")
+        .body(initialize_request().to_string());
+    for (k, v) in &s.headers {
+        req = req.header(k, v);
+    }
+    match req.send() {
+        Ok(resp) => {
+            let status = resp.status();
+            if status.is_success() {
+                McpTestResult {
+                    ok: true,
+                    latency_ms: start.elapsed().as_millis() as u64,
+                    message: format!("HTTP {status} · 握手成功"),
+                }
+            } else {
+                fail(format!("HTTP {status}"))
+            }
+        }
+        Err(e) => fail(format!("请求失败：{e}")),
+    }
+}
+
+/// 单 server 连接测试：真实走一遍 MCP initialize 握手（不写库、不动目标文件）
+#[tauri::command]
+pub async fn mcp_test_connection(
+    state: State<'_, Store>,
+    name: String,
+) -> Result<McpTestResult, String> {
+    let server = {
+        let servers = state.with(list_servers)?;
+        servers
+            .into_iter()
+            .find(|s| s.name == name)
+            .ok_or_else(|| format!("统一定义中无此 server：{name}"))?
+    };
+    let r = tauri::async_runtime::spawn_blocking(move || match server.kind.as_str() {
+        "streamableHttp" => test_http(&server),
+        _ => test_stdio(&server),
+    })
+    .await
+    .map_err(|e| format!("测试任务失败：{e}"))?;
+    Ok(r)
+}

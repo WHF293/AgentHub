@@ -4,6 +4,7 @@ import {
   mcpDelete,
   mcpOverview,
   mcpSave,
+  mcpTestConnection,
   mcpToggle,
   mcpValidate,
   type McpOverviewItem,
@@ -339,6 +340,12 @@ function ServerModal({
   );
 }
 
+/** 单卡片连接测试态：running / ok / fail（result.message 挂 title 提示根因） */
+type McpTestState =
+  | { status: 'running' }
+  | { status: 'ok'; message: string; latency_ms: number }
+  | { status: 'fail'; message: string; latency_ms: number };
+
 /** M3 MCP 岛 —— D1 统一列表（按插件端开关/漂移检测） + D2 弹窗 */
 export function McpPage() {
   const [payload, setPayload] = useState<McpOverviewPayload | null>(null);
@@ -347,6 +354,28 @@ export function McpPage() {
   const [deleting, setDeleting] = useState<McpOverviewItem | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [tests, setTests] = useState<Record<string, McpTestState>>({});
+
+  const runTest = async (item: McpOverviewItem) => {
+    if (tests[item.name]?.status === 'running') return;
+    setTests((t) => ({ ...t, [item.name]: { status: 'running' } }));
+    try {
+      const r = await mcpTestConnection(item.name);
+      setTests((t) => ({
+        ...t,
+        [item.name]: {
+          status: r.ok ? 'ok' : 'fail',
+          message: r.message,
+          latency_ms: r.latency_ms,
+        },
+      }));
+    } catch (e) {
+      setTests((t) => ({
+        ...t,
+        [item.name]: { status: 'fail', message: String(e), latency_ms: 0 },
+      }));
+    }
+  };
 
   const refresh = useCallback(async () => {
     setError(null);
@@ -476,7 +505,17 @@ export function McpPage() {
             统一定义为空 —— 点上方「收编」把各启用插件端现有 server 纳入管理，或新增。
           </div>
         ) : (
-          items.map((item) => (
+          items.map((item) => {
+            const t = tests[item.name];
+            const testChip =
+              t?.status === 'running'
+                ? { cls: 'off', text: '测试中…' }
+                : t?.status === 'ok'
+                  ? { cls: 'ok', text: `✓ ${(t.latency_ms / 1000).toFixed(1)}s` }
+                  : t?.status === 'fail'
+                    ? { cls: 'err', text: '✗ 连接失败' }
+                    : { cls: 'off', text: '↻ 测试连接' };
+            return (
             <div className="item-card sm" key={item.name}>
               <div className="card-top">
                 <span
@@ -501,6 +540,20 @@ export function McpPage() {
                 {item.type} · {item.command ?? item.url ?? '—'}
               </div>
               <div className="card-actions">
+                <span
+                  className={`chip ${testChip.cls}`}
+                  style={{ cursor: t?.status === 'running' ? 'wait' : 'pointer' }}
+                  title={
+                    t?.status === 'running'
+                      ? '正在做 initialize 握手…'
+                      : t
+                        ? t.message
+                        : '启动进程做 MCP initialize 握手，验证命令能否真正连通'
+                  }
+                  onClick={() => void runTest(item)}
+                >
+                  {testChip.text}
+                </span>
                 {item.agents.map((a) => {
                   return (
                     <span
@@ -532,7 +585,8 @@ export function McpPage() {
                 </span>
               </div>
             </div>
-          ))
+            );
+          })
         )}
       </div>
 

@@ -144,6 +144,7 @@ pub fn run() {
             mcp::mcp_toggle,
             mcp::mcp_delete,
             mcp::mcp_validate,
+            mcp::mcp_test_connection,
             providers::providers_overview,
             providers::provider_fetch_models,
             providers::provider_save,

@@ -186,7 +186,16 @@ export interface McpServerInput {
   enabled: Record<string, boolean>;
 }
 
+/** 单 server 连接测试结果（真实 initialize 握手） */
+export interface McpTestResult {
+  ok: boolean;
+  message: string;
+  latency_ms: number;
+}
+
 export const mcpOverview = () => invoke<McpOverviewPayload>('mcp_overview');
+export const mcpTestConnection = (name: string) =>
+  invoke<McpTestResult>('mcp_test_connection', { name });
 export const mcpAdopt = (overwrite: boolean) =>
   invoke<number>('mcp_adopt', { overwrite });
 export const mcpSave = (server: McpServerInput) =>
