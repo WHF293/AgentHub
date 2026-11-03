@@ -11,11 +11,14 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::adapters::{
+use agenthub_core::adapters::{
+    MemoryTarget,
     agent_home, eq_path, link_status_for, AgentAdapter, AgentCaps, McpConfig, McpEntry, McpLive,
     SkillsLink,
 };
-use crate::fsutil::{self, LinkMode, Res};
+use agenthub_core::fsutil::{self, LinkMode, Res};
+use agenthub_core::store::Store;
+use tauri::AppHandle;
 
 pub fn dir() -> PathBuf {
     agent_home().join(".claude")
@@ -90,7 +93,7 @@ impl AgentAdapter for ClaudeAdapter {
         }
         if cdir.is_dir() {
             // 防御：确认目录内所有实目录 skill 都已入中央仓库再腾挪
-            for info in crate::adapters::scan_skills_dir(&cdir) {
+            for info in agenthub_core::adapters::scan_skills_dir(&cdir) {
                 if info.importable && !central.join(&info.name).is_dir() {
                     let dest = central.join(&info.name);
                     fsutil::copy_dir_recursive(Path::new(&info.path), &dest)
@@ -187,4 +190,32 @@ impl AgentAdapter for ClaudeAdapter {
         }
         Some(Value::Object(entry))
     }
+
+    // ── 用量采集域 ──
+
+    fn collect_usage(&self, store: &Store, app: Option<&AppHandle>) -> Res<usize> {
+        crate::usage_claude::collect(store, app)
+    }
+
+    // ── Memory 域 ──
+
+    /// 全局记忆目标：用户级 CLAUDE.md（Claude Code 每次会话加载）
+    fn memory_targets(&self) -> Vec<MemoryTarget> {
+        vec![MemoryTarget {
+            path: dir().join("CLAUDE.md"),
+            id: "claude-memory".into(),
+            label: "Claude Code · CLAUDE.md".into(),
+            readonly_default: false,
+        }]
+    }
+    fn data_dirs(&self) -> Vec<PathBuf> {
+        vec![dir()]
+    }
+    /// 项目指令文件：CLAUDE.md
+    fn instruction_file(&self) -> Option<(&'static str, &'static str)> {
+        Some(("CLAUDE.md", "claude"))
+    }
 }
+
+/// 注册表单例（src-tauri 组装层收进 core 注册表）
+pub static CLAUDE_ADAPTER: ClaudeAdapter = ClaudeAdapter;

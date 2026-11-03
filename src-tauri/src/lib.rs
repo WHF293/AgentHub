@@ -1,16 +1,33 @@
-//! AgentHub 应用壳 —— tauri 窗口/托盘/单实例/自启 + IPC 命令装配。
-//! 全部业务模块在 agenthub-core（P2 起各 agent 域拆入 packages/<id> 插件包），
-//! 这里 glob re-export 保持 `agenthub_lib::<mod>` 路径对 main.rs 无头分发不变。
+//! AgentHub 应用壳 —— tauri 窗口/托盘/单实例/自启 + 插件注册与 IPC 命令装配。
+//!
+//! 业务模块：agenthub-core（glob re-export 保持 `agenthub_lib::<mod>` 对 main.rs 兼容）
+//! + packages/<id> 插件包（适配器与专属域）；跨插件联动编排在 bridge.rs。
+//! 新增插件三步：packages/<id> 新 crate → PLUGINS 数组加一项 → generate_handler 加命令。
 
 pub use agenthub_core::*;
 
+mod bridge;
+
 use std::sync::atomic::Ordering;
 
+use agenthub_core::adapters::{registry_init, AgentAdapter};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager,
 };
+
+/// 插件注册表：顺序 = UI 展示与收编冲突取字段的优先级（先者优先）
+static PLUGINS: [&'static dyn AgentAdapter; 3] = [
+    &agenthub_plugin_workbuddy::adapter::WORKBUDDY,
+    &agenthub_plugin_zcode::adapter::ZCODE_ADAPTER,
+    &agenthub_plugin_claude::adapter::CLAUDE_ADAPTER,
+];
+
+/// 组装层首行必须调用：core 各引擎（skills 迁移 / MCP / 用量 / memory）全部依赖注册表
+pub fn init_plugins() {
+    registry_init(&PLUGINS);
+}
 
 /// 主窗口显出并聚焦（托盘菜单 / 双击托盘共用）
 fn show_main(app: &tauri::AppHandle) {
@@ -22,6 +39,7 @@ fn show_main(app: &tauri::AppHandle) {
 }
 
 pub fn run() {
+    init_plugins();
     tauri::Builder::default()
         // 单实例必须最先注册：二次启动时唤起已有窗口而不是开新进程
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -49,7 +67,7 @@ pub fn run() {
             // 「wb-auto-checkin」开关默认开，Plugin 岛停用 WB 时不执行）
             std::thread::spawn(|| {
                 if let Ok(s2) = store::Store::open() {
-                    let _ = checkin::auto_checkin_all(&s2);
+                    let _ = agenthub_plugin_workbuddy::checkin::auto_checkin_all(&s2);
                 }
             });
 
@@ -112,73 +130,78 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            commands::app_status,
-            commands::run_skills_migration,
-            commands::skills_overview,
-            commands::relink_skill,
-            commands::set_skill_enabled,
-            commands::zcode_plugin_skills,
-            commands::skill_delete,
-            commands::recent_op_log,
-            plugins::plugin_list,
-            plugins::plugin_toggle,
-            mcp::mcp_overview,
-            mcp::mcp_adopt,
-            mcp::mcp_save,
-            mcp::mcp_toggle,
-            mcp::mcp_delete,
-            mcp::mcp_validate,
-            mcp::mcp_test_connection,
-            providers::providers_overview,
-            providers::provider_fetch_models,
-            providers::provider_save,
-            providers::provider_delete,
-            providers::provider_set_default,
-            providers::claude_providers_overview,
-            providers::claude_provider_fetch_models,
-            providers::claude_provider_save,
-            account::wb_overview,
-            account::wb_save_slot,
-            account::wb_switch,
-            account::wb_import_legacy,
-            account::wb_delete_slot,
-            account::wb_rename_slot,
-            usage::usage_collect,
-            usage::usage_overview,
-            usage::usage_matrix,
-            usage::usage_accounts,
-            zaccount::zcode_overview,
-            zaccount::zcode_save_slot,
-            zaccount::zcode_switch,
-            zaccount::zcode_delete_slot,
-            zaccount::zcode_rename_slot,
-            zaccount::zcode_launch,
-            quota::zcode_quota,
-            quota::wb_credit_summary,
-            quota::wb_credit_by_account,
-            quota::wb_credit_set_total,
-            quota::wb_credit_set_balance,
-            sessions::wb_session_list,
-            sessions::wb_session_copy,
-            checkin::wb_checkin_status,
-            checkin::wb_checkin_claim,
-            checkin::wb_checkin_auto_get,
-            checkin::wb_checkin_auto_set,
-            market::market_refresh,
-            market::market_install,
-            memory::memory_global_list,
-            memory::memory_read,
-            memory::memory_write,
-            memory::memory_global_unify,
-            memory::projects_overview,
-            memory::project_init,
-            memory::project_sync,
-            memory::project_consolidate,
-            commands::set_close_to_tray,
-            update::update_check,
-            update::update_install,
-            update::update_proxy_get,
-            update::update_proxy_set,
+            // 组装桥（跨插件编排）
+            bridge::providers_overview,
+            bridge::provider_save,
+            bridge::provider_delete,
+            // core：状态 / Skills / 插件 / MCP / 用量 / 市场 / Memory / 设置 / 更新
+            agenthub_core::commands::app_status,
+            agenthub_core::commands::run_skills_migration,
+            agenthub_core::commands::skills_overview,
+            agenthub_core::commands::relink_skill,
+            agenthub_core::commands::set_skill_enabled,
+            agenthub_core::commands::skill_delete,
+            agenthub_core::commands::recent_op_log,
+            agenthub_core::commands::set_close_to_tray,
+            agenthub_core::plugins::plugin_list,
+            agenthub_core::plugins::plugin_toggle,
+            agenthub_core::mcp::mcp_overview,
+            agenthub_core::mcp::mcp_adopt,
+            agenthub_core::mcp::mcp_save,
+            agenthub_core::mcp::mcp_toggle,
+            agenthub_core::mcp::mcp_delete,
+            agenthub_core::mcp::mcp_validate,
+            agenthub_core::mcp::mcp_test_connection,
+            agenthub_core::usage::usage_collect,
+            agenthub_core::usage::usage_overview,
+            agenthub_core::usage::usage_matrix,
+            agenthub_core::usage::usage_accounts,
+            agenthub_core::market::market_refresh,
+            agenthub_core::market::market_install,
+            agenthub_core::memory::memory_global_list,
+            agenthub_core::memory::memory_read,
+            agenthub_core::memory::memory_write,
+            agenthub_core::memory::memory_global_unify,
+            agenthub_core::memory::projects_overview,
+            agenthub_core::memory::project_init,
+            agenthub_core::memory::project_sync,
+            agenthub_core::memory::project_consolidate,
+            agenthub_core::update::update_check,
+            agenthub_core::update::update_install,
+            agenthub_core::update::update_proxy_get,
+            agenthub_core::update::update_proxy_set,
+            // WorkBuddy 插件
+            agenthub_plugin_workbuddy::account::wb_overview,
+            agenthub_plugin_workbuddy::account::wb_save_slot,
+            agenthub_plugin_workbuddy::account::wb_switch,
+            agenthub_plugin_workbuddy::account::wb_import_legacy,
+            agenthub_plugin_workbuddy::account::wb_delete_slot,
+            agenthub_plugin_workbuddy::account::wb_rename_slot,
+            agenthub_plugin_workbuddy::sessions::wb_session_list,
+            agenthub_plugin_workbuddy::sessions::wb_session_copy,
+            agenthub_plugin_workbuddy::checkin::wb_checkin_status,
+            agenthub_plugin_workbuddy::checkin::wb_checkin_claim,
+            agenthub_plugin_workbuddy::checkin::wb_checkin_auto_get,
+            agenthub_plugin_workbuddy::checkin::wb_checkin_auto_set,
+            agenthub_plugin_workbuddy::quota_wb::wb_credit_summary,
+            agenthub_plugin_workbuddy::quota_wb::wb_credit_by_account,
+            agenthub_plugin_workbuddy::quota_wb::wb_credit_set_total,
+            agenthub_plugin_workbuddy::quota_wb::wb_credit_set_balance,
+            // ZCode 插件
+            agenthub_plugin_zcode::provider_zcode::provider_fetch_models,
+            agenthub_plugin_zcode::provider_zcode::provider_set_default,
+            agenthub_plugin_zcode::quota_zcode::zcode_quota,
+            agenthub_plugin_zcode::skills::zcode_plugin_skills,
+            agenthub_plugin_zcode::zaccount::zcode_overview,
+            agenthub_plugin_zcode::zaccount::zcode_save_slot,
+            agenthub_plugin_zcode::zaccount::zcode_switch,
+            agenthub_plugin_zcode::zaccount::zcode_delete_slot,
+            agenthub_plugin_zcode::zaccount::zcode_rename_slot,
+            agenthub_plugin_zcode::zaccount::zcode_launch,
+            // Claude Code 插件
+            agenthub_plugin_claude::provider_claude::claude_providers_overview,
+            agenthub_plugin_claude::provider_claude::claude_provider_fetch_models,
+            agenthub_plugin_claude::provider_claude::claude_provider_save,
         ])
         .on_window_event(|window, event| {
             // 关闭行为：默认关到托盘（设置岛可切换为直接退出）

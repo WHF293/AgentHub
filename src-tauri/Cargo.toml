@@ -12,9 +12,13 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-# 应用壳：只依赖内核与插件包 + tauri 外壳能力；业务模块全部在 packages/*（P2 起分域）
+# 应用壳：只依赖内核与插件包 + tauri 外壳能力；业务模块全部在 packages/*
 agenthub-core = { path = "../packages/core" }
+agenthub-plugin-workbuddy = { path = "../packages/workbuddy" }
+agenthub-plugin-zcode = { path = "../packages/zcode" }
+agenthub-plugin-claude = { path = "../packages/claude" }
 tauri = { workspace = true, features = ["tray-icon"] }
 tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
+serde = { workspace = true }
 serde_json = { workspace = true }

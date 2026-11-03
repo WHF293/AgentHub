@@ -11,9 +11,8 @@ use std::path::{Path, PathBuf};
 use chrono::TimeZone;
 use serde::Serialize;
 
-use crate::adapters::{agent_home, wb, zcode};
+use crate::adapters::{agent_home, eq_path, MemoryTarget};
 use crate::fsutil::{self, LinkMode, Res};
-use crate::adapters::eq_path;
 use crate::store::{self, Store};
 
 pub const BLOCK_START: &str = "<!-- agent-hub:start -->";
@@ -83,47 +82,34 @@ fn points_to(path: &Path, canonical: &Path) -> bool {
 }
 
 /// 全局记忆文件列表：hub 真身恒显；各端残留文件仅在该端插件启用时列出
+/// （目标清单由各插件经 AgentAdapter::memory_targets 提供，core 不感知具体路径）
 pub fn global_files(store: &Store) -> Vec<MemoryFile> {
     let enabled = crate::plugins::enabled_ids(store).unwrap_or_default();
     let on = |agent: &str| enabled.iter().any(|id| id == agent);
     let mut out = Vec::new();
     let canonical = store::central_memory_md();
-    // 统一真身 ~/.agenthub/MEMORY.md：存在即排最前（双端共写唯一入口）
+    // 统一真身 ~/.agenthub/MEMORY.md：存在即排最前（各端共写唯一入口）
     if canonical.is_file() {
         if let Some(f) = file_meta(
             &canonical,
             "hub-memory",
-            "全局记忆 · MEMORY.md（ZCode + WB 共用）",
+            "全局记忆 · MEMORY.md（各启用 Agent 共用）",
             "hub",
             false,
         ) {
             out.push(f);
         }
     }
-    // 各端用户级记忆：已建链指向真身的不单列（就是真身本身），未统一的照旧列出便于发现残留。
-    // WB memory/<uid>_memory.md（Agent 自动生成的 User Memory Profile，带 RAW_JSON 块）
-    // 属 agent 自身系统文件，始终不列。
-    if on("workbuddy") {
-        for uid in wb::user_dirs() {
-            let p = wb::dir().join(&uid).join("MEMORY.md");
-            if p.is_file() && !points_to(&p, &canonical) {
-                if let Some(f) = file_meta(
-                    &p,
-                    &format!("wb-user-{uid}"),
-                    &format!("WB · {} · MEMORY.md（用户级）", &uid[5..13]),
-                    "workbuddy",
-                    false,
-                ) {
+    // 各端用户级记忆：已建链指向真身的不单列（就是真身本身），未统一的照旧列出便于发现残留
+    for a in crate::adapters::registry() {
+        if !on(a.id()) {
+            continue;
+        }
+        for t in a.memory_targets() {
+            if t.path.is_file() && !points_to(&t.path, &canonical) {
+                if let Some(f) = file_meta(&t.path, &t.id, &t.label, a.id(), t.readonly_default) {
                     out.push(f);
                 }
-            }
-        }
-    }
-    if on("zcode") {
-        let agents = zcode::agents_md();
-        if agents.is_file() && !points_to(&agents, &canonical) {
-            if let Some(f) = file_meta(&agents, "zcode-agents", "ZCode · AGENTS.md", "zcode", true) {
-                out.push(f);
             }
         }
     }
@@ -133,13 +119,12 @@ pub fn global_files(store: &Store) -> Vec<MemoryFile> {
     out
 }
 
-/// 路径安全：只允许 ~/.workbuddy、~/.zcode、~/.agenthub 与已注册项目目录
+/// 路径安全：只允许各 agent 数据根（插件 data_dirs 钩子提供）、~/.agenthub 与已注册项目目录
 fn allowed_root_of(path: &Path, store: &Store) -> Option<PathBuf> {
-    let candidates = [
-        wb::dir(),
-        zcode::dir(),
-        store::hub_dir(),
-    ];
+    let mut candidates: Vec<PathBuf> = vec![store::hub_dir()];
+    for a in crate::adapters::registry() {
+        candidates.extend(a.data_dirs());
+    }
     // canonicalize 对尚不存在的新文件会失败：退化为其父目录 canonicalize + 文件名
     let canon = |p: &Path| {
         std::fs::canonicalize(p).unwrap_or_else(|_| {
@@ -198,22 +183,24 @@ pub struct WriteMemoryInput {
 pub fn write_global(store: &Store, input: &WriteMemoryInput) -> Res<()> {
     let raw = Path::new(&input.path);
     let root = allowed_root_of(raw, store).ok_or_else(|| format!("路径不在允许范围：{}", input.path))?;
-    // 插件门控：写入目标属哪端就要求哪端插件启用（hub 真身恒可写）
+    // 归属判定：目标落在哪个插件的数据根就要求哪个插件启用（hub 真身恒可写）
     let enabled = crate::plugins::enabled_ids(store)?;
-    let owner = if raw.starts_with(zcode::dir()) {
-        "zcode"
-    } else if raw.starts_with(wb::dir()) {
-        "workbuddy"
-    } else {
-        "hub"
-    };
-    if owner != "hub" && !enabled.iter().any(|id| id == owner) {
-        return Err(format!("{} 插件已停用，不能写入其记忆文件（到 Plugin 岛开启）",
-            crate::adapters::by_id(owner).map(|a| a.display_name().to_string()).unwrap_or_default()));
+    let mut owner: Option<&'static dyn crate::adapters::AgentAdapter> = None;
+    for a in crate::adapters::registry() {
+        if a.data_dirs().iter().any(|d| raw.starts_with(d)) {
+            owner = Some(*a);
+            break;
+        }
     }
-    let is_zcode_agents = raw == zcode::agents_md();
-    if is_zcode_agents && !input.allow_zcode_agents {
-        return Err("ZCode AGENTS.md 默认只读（避免与 ZCode 自身写入冲突），请先解锁".into());
+    if let Some(a) = owner {
+        if !enabled.iter().any(|id| id == a.id()) {
+            return Err(format!(
+                "{} 插件已停用，不能写入其记忆文件（到 Plugin 岛开启）",
+                a.display_name()
+            ));
+        }
+        // 只读守卫（如 ZCode AGENTS.md 需显式解锁；unlock 语义沿前端字段 allow_zcode_agents）
+        a.memory_write_guard(raw, input.allow_zcode_agents)?;
     }
     let _ = root;
     // 统一建链的路径解析到真身再写：atomic_write 的 tmp+rename 会把符号链接替换成实体文件
@@ -251,42 +238,34 @@ pub fn unify_global_memory(store: &Store) -> Res<Vec<String>> {
         return Err("本机无法创建符号链接（需开发者模式或管理员权限），未做任何改动".into());
     }
     let canonical = store::central_memory_md();
-    // 插件门控：只对已启用端做种子合并与建链
+    // 插件门控：只对已启用端的记忆目标做种子合并与建链（目标清单来自 memory_targets 钩子）
     let enabled = crate::plugins::enabled_ids(store)?;
-    let wb_on = enabled.iter().any(|id| id == "workbuddy");
-    let zc_on = enabled.iter().any(|id| id == "zcode");
-    // 种子：真身不存在时合并各来源（WB 用户级在前、ZCode AGENTS.md 在后）
+    let targets_all: Vec<(&'static dyn crate::adapters::AgentAdapter, Vec<MemoryTarget>)> =
+        crate::adapters::registry()
+            .iter()
+            .filter(|a| enabled.iter().any(|id| id == a.id()))
+            .map(|a| (*a, a.memory_targets()))
+            .collect();
+    // 种子：真身不存在时合并各来源（注册表顺序，即 WB → ZCode → Claude）
     if !canonical.is_file() {
         let stamp = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
         let mut body = format!(
             "# MEMORY.md — 全局记忆（各启用 Agent 统一共用）\n\n\
              > 由 AgentHub「统一全局记忆」生成于 {stamp}；原文件已备份至 ~/.agenthub/backups/memory/。\n\
-             > 本文件是各启用端唯一真身：~/.zcode/AGENTS.md 与 ~/.workbuddy/user-*-personal/MEMORY.md\n\
-             > 均为其符号链接，任一端保存全局记忆都写入这里。\n\n"
+             > 本文件是各启用端唯一真身，各端用户级记忆文件均为指向它的符号链接，\n\
+             > 任一端保存全局记忆都写入这里。\n\n"
         );
         let mut sources = 0usize;
-        if wb_on {
-            for uid in wb::user_dirs() {
-                let p = wb::dir().join(&uid).join("MEMORY.md");
-                if p.is_file() {
+        for (_, targets) in &targets_all {
+            for t in targets {
+                if t.path.is_file() {
                     sources += 1;
                     body.push_str(&format!(
                         "<!-- 来源: {} -->\n{}\n\n---\n\n",
-                        p.display(),
-                        std::fs::read_to_string(&p).unwrap_or_default()
+                        t.path.display(),
+                        std::fs::read_to_string(&t.path).unwrap_or_default()
                     ));
                 }
-            }
-        }
-        if zc_on {
-            let agents = zcode::agents_md();
-            if agents.is_file() {
-                sources += 1;
-                body.push_str(&format!(
-                    "<!-- 来源: {} -->\n{}\n",
-                    agents.display(),
-                    std::fs::read_to_string(&agents).unwrap_or_default()
-                ));
             }
         }
         fsutil::atomic_write(&canonical, body.as_bytes())?;
@@ -298,21 +277,15 @@ pub fn unify_global_memory(store: &Store) -> Res<Vec<String>> {
         steps.push(format!("✓ 真身已存在，沿用：{}", canonical.display()));
     }
     // 目标：各启用端的用户级记忆路径（没有的也建链，获得统一记忆）
-    let mut targets: Vec<(PathBuf, String)> = Vec::new();
-    if zc_on {
-        targets.push((zcode::agents_md(), "ZCode · AGENTS.md".into()));
-    }
-    if wb_on {
-        for uid in wb::user_dirs() {
-            targets.push((
-                wb::dir().join(&uid).join("MEMORY.md"),
-                format!("WB · {} · MEMORY.md", &uid[5..13]),
-            ));
+    let mut link_targets: Vec<(PathBuf, String)> = Vec::new();
+    for (_, targets) in &targets_all {
+        for t in targets {
+            link_targets.push((t.path.clone(), t.label.clone()));
         }
     }
     let backup_dir = store::backups_dir().join("memory");
     let mut failed = 0usize;
-    for (p, name) in &targets {
+    for (p, name) in link_targets.iter() {
         if points_to(p, &canonical) {
             steps.push(format!("✓ {name} 已指向真身，跳过"));
             continue;
@@ -353,7 +326,7 @@ pub fn unify_global_memory(store: &Store) -> Res<Vec<String>> {
             }
         }
     }
-    if targets.is_empty() {
+    if link_targets.is_empty() {
         steps.push("没有已启用的 agent 插件，未建任何链接（到 Plugin 岛开启后重跑）".into());
     } else if failed > 0 {
         steps.push(format!("⚠ 统一完成但有 {failed} 项失败，修复后重跑即可（幂等）"));
@@ -365,7 +338,7 @@ pub fn unify_global_memory(store: &Store) -> Res<Vec<String>> {
             conn,
             "memory.unify",
             &canonical.to_string_lossy(),
-            serde_json::json!({ "targets": targets.len(), "failed": failed }),
+            serde_json::json!({ "targets": link_targets.len(), "failed": failed }),
         );
         Ok(())
     })?;
@@ -401,38 +374,9 @@ fn project_name(path: &str) -> String {
 
 fn ensure_projects_from_agents(store: &Store) -> Res<()> {
     let mut paths: Vec<String> = Vec::new();
-    // ZCode recentProjects（字符串数组）
-    if let Ok(bytes) = std::fs::read(zcode::v2_setting()) {
-        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-            if let Some(arr) = v.get("recentProjects").and_then(|x| x.as_array()) {
-                for p in arr {
-                    if let Some(s) = p.as_str() {
-                        paths.push(s.to_string());
-                    }
-                }
-            }
-        }
-    }
-    // WB：sessions.cwd 按出现次数排序（排除临时缓存目录）
-    let db = wb::dir().join("workbuddy.db");
-    if db.is_file() {
-        if let Ok(conn) = rusqlite::Connection::open_with_flags(
-            &db,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        ) {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT cwd, COUNT(*) AS c FROM sessions
-                     WHERE IFNULL(cwd,'') != '' GROUP BY cwd ORDER BY c DESC LIMIT 40",
-                )
-                .map_err(|e| e.to_string())?;
-            let rows = stmt
-                .query_map([], |row| row.get::<_, String>(0))
-                .map_err(|e| e.to_string())?;
-            for r in rows.flatten() {
-                paths.push(r);
-            }
-        }
+    // 项目目录发现经各插件 discover_project_dirs 钩子提供（core 不感知具体端）
+    for a in crate::adapters::registry() {
+        paths.extend(a.discover_project_dirs());
     }
     // 归一化：canonicalize 消除正反斜杠差异；排除临时缓存 / 不存在目录
     let mut normalized: Vec<String> = Vec::new();
@@ -464,10 +408,13 @@ fn ensure_projects_from_agents(store: &Store) -> Res<()> {
 
 fn instruction_files(path: &Path) -> Vec<(String, PathBuf)> {
     let mut out = Vec::new();
-    for (name, agent) in [("AGENTS.md", "zcode"), ("CLAUDE.md", "claude")] {
-        let p = path.join(name);
-        if p.is_file() {
-            out.push((agent.to_string(), p));
+    // 指令文件清单来自各插件 instruction_file 钩子（如 AGENTS.md→zcode、CLAUDE.md→claude）
+    for a in crate::adapters::registry() {
+        if let Some((name, agent)) = a.instruction_file() {
+            let p = path.join(name);
+            if p.is_file() {
+                out.push((agent.to_string(), p));
+            }
         }
     }
     out

@@ -16,9 +16,9 @@ use rusqlite::types::Value as SqlValue;
 use rusqlite::OpenFlags;
 use serde::Serialize;
 
-use crate::adapters::wb;
-use crate::fsutil::Res;
-use crate::store::{self, Store};
+use crate::adapter as wb;
+use agenthub_core::fsutil::Res;
+use agenthub_core::store::{self, Store};
 
 /// Claw 工作区（绑定账号渠道，禁止复制）—— 判定与 workbuddy-switch 一致：cwd 末段 == "claw"
 fn is_claw_workspace(cwd: &str) -> bool {
@@ -531,7 +531,7 @@ use tauri::State;
 
 #[tauri::command]
 pub fn wb_session_list(state: State<'_, Store>, uid: String) -> Result<Vec<WbSessionInfo>, String> {
-    crate::plugins::require_enabled(&state, "workbuddy")?;
+    agenthub_core::plugins::require_enabled(&state, "workbuddy")?;
     list_sessions(&state, &uid)
 }
 
@@ -573,7 +573,7 @@ pub fn wb_session_copy(
     state: State<'_, Store>,
     input: SessionCopyInput,
 ) -> Result<SessionCopyReport, String> {
-    crate::plugins::require_enabled(&state, "workbuddy")?;
+    agenthub_core::plugins::require_enabled(&state, "workbuddy")?;
     let mut report = SessionCopyReport::default();
 
     if input.session_ids.is_empty() {
@@ -600,7 +600,7 @@ pub fn wb_session_copy(
 
     // 复制前整库备份一次（多目标共用同一备份目录，可溯）
     let sess_backup =
-        crate::store::backups_dir().join(format!("session-{}", crate::fsutil::now_stamp()));
+        agenthub_core::store::backups_dir().join(format!("session-{}", agenthub_core::fsutil::now_stamp()));
     if let Err(e) = backup_db(&sess_backup) {
         report.error = Some(format!("workbuddy.db 备份失败（{e}），已中止复制"));
         restart_wb_if_killed(&mut report);

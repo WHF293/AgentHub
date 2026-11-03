@@ -19,8 +19,8 @@ use std::io::Read;
 use chrono::{Local, TimeZone};
 use serde::Serialize;
 
-use crate::fsutil::Res;
-use crate::store::Store;
+use agenthub_core::fsutil::Res;
+use agenthub_core::store::Store;
 
 /// 事件来源标记（usage_events.source），与 rollout / session-snapshot 并列
 const SOURCE: &str = "ccswitch-import";
@@ -238,7 +238,7 @@ fn do_import(store: &Store, src: &rusqlite::Connection) -> Res<ImportReport> {
             // 合成 id 用整行主键（date/app/provider/model/request_model/pricing_model）的
             // FNV 指纹：同日同模型多 provider 的行不会撞车丢数据
             let row_key = format!("{date}|{agent}|{pid}|{model}|{request_model}|{pricing_model}");
-            let fp = crate::fsutil::fnv1a(&row_key);
+            let fp = agenthub_core::fsutil::fnv1a(&row_key);
             for i in 0..n {
                 rollup.push(Event {
                     agent: agent.clone(),

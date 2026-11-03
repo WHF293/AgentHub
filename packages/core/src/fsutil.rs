@@ -235,3 +235,26 @@ pub fn parse_skill_md(path: &Path) -> (Option<String>, Option<String>) {    let 
     }
     (name, description)
 }
+
+// ─── 通用 JSON / 网络错误助手（各插件包共用） ───
+
+/// 读文件并解析 JSON；文件缺失返回空对象
+pub fn read_json(path: &std::path::Path) -> Result<serde_json::Value, String> {
+    match read_opt(path) {
+        Some(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|e| format!("JSON 解析失败 {}: {e}", path.display())),
+        None => Ok(serde_json::json!({})),
+    }
+}
+
+/// reqwest 错误 → 可展示文本（展开原因链：顶层 "error sending request" 不含真实原因，
+/// 底层才是 DNS / 连接拒绝 / TLS 等可定位信息）
+pub fn net_err(e: reqwest::Error) -> String {
+    let mut msg = e.to_string();
+    let mut src = std::error::Error::source(&e);
+    while let Some(s) = src {
+        msg.push_str(&format!(" ← {s}"));
+        src = s.source();
+    }
+    msg
+}

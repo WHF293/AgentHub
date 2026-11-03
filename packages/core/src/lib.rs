@@ -4,10 +4,7 @@
 //! Skills/MCP/用量引擎、第三方模型编排、Memory/Skill 市场/在线更新、各域 IPC 命令。
 //! P2 起各 agent 专属域逐包拆入 packages/<id>（本 crate 只留 trait/引擎/编排）。
 
-pub mod account;
 pub mod adapters;
-pub mod ccsimport;
-pub mod checkin;
 pub mod commands;
 pub mod fsutil;
 pub mod mcp;
@@ -16,13 +13,9 @@ pub mod memory;
 pub mod migrate;
 pub mod modelfetch;
 pub mod plugins;
-pub mod providers;
-pub mod quota;
-pub mod sessions;
 pub mod store;
 pub mod update;
 pub mod usage;
-pub mod zaccount;
 
 use std::sync::atomic::AtomicBool;
 

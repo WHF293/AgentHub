@@ -1,25 +1,25 @@
 //! adapters —— AgentAdapter 抽象（可插拔核心层）。
 //!
-//! 每个 agent 一个模块（wb.rs / zcode.rs），各自实现 [`AgentAdapter`] trait 并注册进
-//! [`registry()`]。新增 agent 适配器（claude / codex / trae…，社区贡献）只需：
-//! 1. 新建 `adapters/<id>.rs` 实现 trait（按能力域裁剪，`caps` 里关掉不支持的域）；
-//! 2. 在 `lib.rs` 注册模块 + 在下方 `REGISTRY` 数组加一行；
-//! 3. 前端 `src/agents.ts` 注册表补一条名称/身份色。
-//! 共享引擎（skills 迁移、MCP 同步、插件门控）与 UI 全部按注册表与能力声明驱动，
-//! 不需要改任何引擎代码。用户的启用/停用状态存 SQLite `plugin_state`（见 plugins.rs）。
+//! 每个插件一个包（packages/<id>），各自实现 [`AgentAdapter`] 并在组装层注册进
+//! [`registry()`]。新增插件三步：
+//! 1. `packages/<id>/` 新 crate：实现 trait（按能力域裁剪，`caps` 关掉不支持的域）+
+//!    `pub static <ID>: <Adapter>` 暴露单例；
+//! 2. src-tauri `PLUGINS` 数组加一项（registry_init 一次性收编）；
+//! 3. `generate_handler!` 加该包命令路径。
+//! 共享引擎（skills 迁移、MCP 同步、用量采集、插件门控）与 UI 全部按注册表与能力
+//! 声明驱动，不需要改任何引擎代码。启用/停用/安装状态存 SQLite plugin_state（plugins.rs）。
 
-pub mod claude;
-pub mod wb;
-pub mod zcode;
-
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::UNIX_EPOCH;
 
 use serde::Serialize;
 use serde_json::Value;
+use tauri::AppHandle;
 
 use crate::fsutil;
+use crate::fsutil::Res;
+use crate::store::Store;
 
 /// Windows 下取用户主目录（本项目 Windows 优先，不走 home 环境变量链）
 pub fn agent_home() -> PathBuf {
@@ -42,6 +42,15 @@ pub struct AgentCaps {
 pub enum SkillsLink {
     PerSkill,
     WholeDir,
+}
+
+/// Memory 岛全局记忆目标（列表展示 + 统一建链目标）
+pub struct MemoryTarget {
+    pub path: PathBuf,
+    pub id: String,
+    pub label: String,
+    /// 默认只读（如 ZCode AGENTS.md），写需经 memory_write_guard 解锁
+    pub readonly_default: bool,
 }
 
 // ─── skills 域共享助手 ───
@@ -77,8 +86,8 @@ pub struct McpEntry {
     pub command: Option<String>,
     pub args: Vec<String>,
     pub url: Option<String>,
-    pub env: BTreeMap<String, String>,
-    pub headers: BTreeMap<String, String>,
+    pub env: std::collections::BTreeMap<String, String>,
+    pub headers: std::collections::BTreeMap<String, String>,
     pub enabled: bool,
 }
 
@@ -99,8 +108,8 @@ pub struct McpConfig {
 
 // ─── AgentAdapter trait ───
 
-/// agent 适配器：路径约定、资产探测、skills 分发、MCP 格式翻译。
-/// 实现须无内部可变状态（&self 并发安全），社区适配器照此接入。
+/// agent 适配器：路径约定、资产探测、skills 分发、MCP 格式翻译、用量采集与 Memory 贡献。
+/// 实现须无内部可变状态（&self 并发安全），社区插件包照此接入。
 pub trait AgentAdapter: Sync + Send {
     /// 稳定 id（存 DB / IPC 传输用），如 "workbuddy"
     fn id(&self) -> &'static str;
@@ -147,7 +156,7 @@ pub trait AgentAdapter: Sync + Send {
     fn mcp_config(&self) -> McpConfig {
         unreachable!("caps.mcp = false 的适配器不使用 MCP 域")
     }
-    /// 目标条目实测状态（WB 读 disabled / ZCode 读 enabled）
+    /// 目标条目实测状态（WB 读 disabled / ZCode 读 enabled / Claude 在场即启用）
     fn mcp_entry_live(&self, _entry: &Value) -> McpLive {
         unreachable!("caps.mcp = false 的适配器不使用 MCP 域")
     }
@@ -168,6 +177,49 @@ pub trait AgentAdapter: Sync + Send {
         kind.to_string()
     }
 
+    // ── Skills 联动域（默认无联动） ──
+
+    /// 技能「允许模型自动调用」映射（Skills 岛 wb_auto 列等聚合展示用）
+    fn skill_auto_map(&self) -> std::collections::HashMap<String, bool> {
+        std::collections::HashMap::new()
+    }
+    /// 启停 skill 的端侧联动（如 WB 写穿自身 skills-installed-store.json）。
+    /// 返回可展示的同步结果消息；None = 该端无此联动。
+    fn on_skill_enabled(&self, _store: &Store, _name: &str, _enabled: bool) -> Res<Option<String>> {
+        Ok(None)
+    }
+
+    // ── 用量采集域（usage 引擎经此分发；默认不采集） ──
+
+    /// 全量+增量采集该端用量入 usage_events（重复调用按 request_id 幂等）。
+    /// 返回本次新增事件数。互斥/进度事件由 core 引擎统一负责，实现只管解析与落库。
+    fn collect_usage(&self, _store: &Store, _app: Option<&AppHandle>) -> Res<usize> {
+        Ok(0)
+    }
+
+    // ── Memory 域（无全局记忆概念的端返回空/默认） ──
+
+    /// 全局记忆目标清单（Memory 岛列表 + 统一建链；含该端全部用户级记忆文件的枚举）
+    fn memory_targets(&self) -> Vec<MemoryTarget> {
+        Vec::new()
+    }
+    /// 数据根目录（Memory 岛路径安全白名单 + 写入归属判定）
+    fn data_dirs(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
+    /// 只读记忆文件写守卫：unlock = 用户已显式解锁（如 ZCode AGENTS.md）
+    fn memory_write_guard(&self, _path: &Path, _unlock: bool) -> Res<()> {
+        Ok(())
+    }
+    /// 项目目录发现（Memory 岛项目注册表自动补全）：该端最近使用的项目路径
+    fn discover_project_dirs(&self) -> Vec<String> {
+        Vec::new()
+    }
+    /// 项目指令文件：(文件名, agent id)，如 ("AGENTS.md", "zcode")；无则 None
+    fn instruction_file(&self) -> Option<(&'static str, &'static str)> {
+        None
+    }
+
     // ── 账号/登录态探测（Account 岛健康卡用；无登录态概念的端返回 false） ──
 
     fn auth_found(&self) -> bool {
@@ -175,26 +227,25 @@ pub trait AgentAdapter: Sync + Send {
     }
 }
 
-// ─── 注册表 ───
+// ─── 注册表（运行时收编，组装层一次性 init） ───
 
-pub static WORKBUDDY: wb::WorkBuddyAdapter = wb::WorkBuddyAdapter;
-pub static ZCODE: zcode::ZcodeAdapter = zcode::ZcodeAdapter;
-pub static CLAUDE: claude::ClaudeAdapter = claude::ClaudeAdapter;
+static REGISTRY: OnceLock<&'static [&'static dyn AgentAdapter]> = OnceLock::new();
 
-/// 内置适配器注册表（社区新增 agent 在此追加一行 + lib.rs 注册模块）
-static REGISTRY: [&'static dyn AgentAdapter; 3] = [&WORKBUDDY, &ZCODE, &CLAUDE];
+/// 注册全部插件适配器（src-tauri 组装层启动首行调用一次；重复调用被忽略）。
+/// 顺序 = UI 展示与收编冲突取字段的优先级（先者优先）。
+pub fn registry_init(adapters: &'static [&'static dyn AgentAdapter]) -> bool {
+    REGISTRY.set(adapters).is_ok()
+}
 
-/// 全部已注册适配器（注册表顺序 = WB 优先，收编冲突时取先者字段）
+/// 全部已注册适配器
 pub fn registry() -> &'static [&'static dyn AgentAdapter] {
-    &REGISTRY
+    REGISTRY.get().expect("插件注册表未初始化（组装层须先调 adapters::registry_init）")
 }
 
 /// 按 id 取适配器
 pub fn by_id(id: &str) -> Option<&'static dyn AgentAdapter> {
-    REGISTRY.iter().copied().find(|a| a.id() == id)
+    registry().iter().copied().find(|a| a.id() == id)
 }
-
-use crate::fsutil::Res;
 
 /// skill 目录扫描结果（中央仓库与各 agent 目录共用）
 #[derive(Debug, Serialize, Clone)]

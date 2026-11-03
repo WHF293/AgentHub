@@ -10,9 +10,9 @@ use std::process::Command;
 
 use serde::Serialize;
 
-use crate::adapters::zcode;
-use crate::fsutil::{self, Res};
-use crate::store::{self, Store};
+use crate::adapter as zcode;
+use agenthub_core::fsutil::{self, Res};
+use agenthub_core::store::{self, Store};
 
 /// ZCode 桌面主程序（与 WB_EXE 同约定：安装路径写死，卸载/迁移后启动按钮降级提示）
 const ZCODE_EXE: &str = r"D:\Application\zcode\ZCode.exe";
@@ -157,7 +157,7 @@ fn gate_zcode_plugin() -> Result<(), String> {
 
 #[tauri::command]
 pub async fn zcode_save_slot(state: State<'_, Store>, label: String) -> Result<ZcodeSlot, String> {
-    crate::plugins::require_enabled(&state, "zcode")?;
+    agenthub_core::plugins::require_enabled(&state, "zcode")?;
     let src = cred_file();
     if !src.is_file() {
         return Err("未找到 ~/.zcode/v2/credentials.json（ZCode 未登录？）".into());
@@ -202,7 +202,7 @@ pub async fn zcode_switch(
     input: ZcodeSwitchInput,
 ) -> Result<ZcodeSwitchReport, String> {
     let _ = state; // 占位：与 WB 切换不同，无 DB 写操作；保留结构以便扩展
-    crate::plugins::require_enabled(&state, "zcode")?;
+    agenthub_core::plugins::require_enabled(&state, "zcode")?;
     let mut steps = Vec::new();
     let slot_id = input.slot_id;
     let src = slot_file(&slot_id);
@@ -274,7 +274,7 @@ pub struct ZcodeSwitchInput {
 
 #[tauri::command]
 pub async fn zcode_delete_slot(state: State<'_, Store>, slot: String) -> Result<(), String> {
-    crate::plugins::require_enabled(&state, "zcode")?;
+    agenthub_core::plugins::require_enabled(&state, "zcode")?;
     state.with(|conn| {
         conn.execute("DELETE FROM zcode_slots WHERE id = ?1", rusqlite::params![slot])
             .map_err(|e| e.to_string())?;
@@ -292,9 +292,9 @@ pub async fn zcode_delete_slot(state: State<'_, Store>, slot: String) -> Result<
 #[tauri::command]
 pub async fn zcode_rename_slot(
     state: State<'_, Store>,
-    input: crate::account::SlotRenameInput,
+    input: ZcodeSlotRenameInput,
 ) -> Result<(), String> {
-    crate::plugins::require_enabled(&state, "zcode")?;
+    agenthub_core::plugins::require_enabled(&state, "zcode")?;
     let label = input.label.trim();
     if label.is_empty() {
         return Err("槽位名称不能为空".into());
@@ -308,4 +308,11 @@ pub async fn zcode_rename_slot(
         store::log_op(conn, "zcode.rename_slot", label, serde_json::json!({ "id": input.slot_id }));
         Ok(())
     })
+}
+
+/// 槽位改名 input（与 WB account::SlotRenameInput 同形；跨包不共享类型，IPC 契约一致即可）
+#[derive(Debug, serde::Deserialize)]
+pub struct ZcodeSlotRenameInput {
+    pub slot_id: String,
+    pub label: String,
 }

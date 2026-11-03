@@ -48,6 +48,10 @@ name = "agenthub"
 version = "0.1.0"
 dependencies = [
  "agenthub-core",
+ "agenthub-plugin-claude",
+ "agenthub-plugin-workbuddy",
+ "agenthub-plugin-zcode",
+ "serde",
  "serde_json",
  "tauri",
  "tauri-build",
@@ -75,13 +79,27 @@ name = "agenthub-plugin-claude"
 version = "0.1.0"
 dependencies = [
  "agenthub-core",
+ "chrono",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tauri",
 ]
 
 [[package]]
 name = "agenthub-plugin-workbuddy"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "agenthub-core",
+ "base64 0.22.1",
+ "chrono",
+ "reqwest 0.12.28",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tauri",
 ]
 
 [[package]]
@@ -89,6 +107,12 @@ name = "agenthub-plugin-zcode"
 version = "0.1.0"
 dependencies = [
  "agenthub-core",
+ "chrono",
+ "reqwest 0.12.28",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tauri",
 ]
 
 [[package]]

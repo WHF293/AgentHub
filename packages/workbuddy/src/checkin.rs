@@ -24,9 +24,9 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tauri::State;
 
-use crate::adapters::wb;
-use crate::fsutil::{self, Res};
-use crate::store::{self, Store};
+use crate::adapter as wb;
+use agenthub_core::fsutil::{self, Res};
+use agenthub_core::store::{self, Store};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const FALLBACK_DOMAIN: &str = "www.workbuddy.cn";
@@ -239,18 +239,6 @@ fn resolve_creds(store: &Store) -> Res<Vec<WbCreds>> {
 
 // ─── 签到接口 ───
 
-/// 展开 reqwest 错误原因链：顶层 "error sending request" 不含真实原因，
-/// 底层才是 DNS / 连接拒绝 / TLS 等可定位信息
-pub fn net_err(e: reqwest::Error) -> String {
-    let mut msg = e.to_string();
-    let mut src = std::error::Error::source(&e);
-    while let Some(s) = src {
-        msg.push_str(&format!(" ← {s}"));
-        src = s.source();
-    }
-    msg
-}
-
 fn post_checkin(creds: &WbCreds, path: &str) -> Result<serde_json::Value, String> {
     let url = format!("https://{}{}", creds.domain, path);
     let client = reqwest::blocking::Client::builder()
@@ -290,7 +278,7 @@ fn post_checkin(creds: &WbCreds, path: &str) -> Result<serde_json::Value, String
                 }
                 return Ok(body);
             }
-            Err(e) => last_err = format!("请求失败: {}", net_err(e)),
+            Err(e) => last_err = format!("请求失败: {}", fsutil::net_err(e)),
         }
     }
     Err(last_err)
@@ -487,7 +475,7 @@ pub struct WbCheckinInput {
 pub async fn wb_checkin_claim(input: WbCheckinInput) -> Result<WbCheckinResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let store = Store::open().map_err(|e| format!("打开本地库失败: {e}"))?;
-        if !crate::plugins::enabled_ids(&store)
+        if !agenthub_core::plugins::enabled_ids(&store)
             .map(|ids| ids.iter().any(|a| a == "workbuddy"))
             .unwrap_or(false)
         {
@@ -557,7 +545,7 @@ pub fn auto_checkin_all(store: &Store) -> Res<Vec<WbCheckinResult>> {
     if !auto_checkin_enabled() {
         return Ok(Vec::new());
     }
-    if crate::plugins::enabled_ids(store)
+    if agenthub_core::plugins::enabled_ids(store)
         .map(|ids| !ids.iter().any(|a| a == "workbuddy"))
         .unwrap_or(true)
     {

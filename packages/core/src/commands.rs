@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use serde::Serialize;
 use tauri::State;
 
-use crate::adapters::{self, wb, zcode, SkillsLink};
+use crate::adapters::{self, SkillsLink};
 use crate::fsutil;
 use crate::migrate;
 use crate::plugins;
@@ -157,7 +157,13 @@ pub fn skills_overview(store_state: State<'_, Store>) -> Result<Vec<SkillOvervie
     })?;
 
     let mut items = Vec::new();
-    let wb_auto = wb_auto_map();
+    // 各端「允许模型自动调用」实测聚合（钩子聚合，core 不感知具体端）
+    let mut auto_map: HashMap<String, bool> = HashMap::new();
+    for a in adapters::registry() {
+        for (k, v) in a.skill_auto_map() {
+            auto_map.entry(k).or_insert(v);
+        }
+    }
     for info in central_list {
         let central_skill = central.join(&info.name);
         let mut agent_states = Vec::new();
@@ -177,7 +183,7 @@ pub fn skills_overview(store_state: State<'_, Store>) -> Result<Vec<SkillOvervie
             source: source_map.get(&info.name).cloned().unwrap_or_default(),
             source_ref: srcref_map.get(&info.name).cloned().flatten(),
             agents: agent_states,
-            wb_auto: wb_auto.get(&info.name).copied(),
+            wb_auto: auto_map.get(&info.name).copied(),
         });
     }
     Ok(items)
@@ -244,29 +250,6 @@ pub fn relink_skill(
     Ok("linked".to_string())
 }
 
-/// WB 端技能「允许模型自动调用」映射（skills-installed-store.json 的
-/// disableModelInvocation 取反）；WB 未收录的技能不在表里
-fn wb_auto_map() -> HashMap<String, bool> {
-    let mut map = HashMap::new();
-    for path in wb::skill_toggle_stores() {
-        let Some(bytes) = fsutil::read_opt(&path) else { continue };
-        let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else { continue };
-        let Some(obj) = v.as_object() else { continue };
-        for node in obj.values() {
-            let Some(data) = node.get("data").and_then(|d| d.as_array()) else { continue };
-            for e in data {
-                let Some(name) = e.get("name").and_then(|n| n.as_str()) else { continue };
-                let auto = !e
-                    .get("disableModelInvocation")
-                    .and_then(|b| b.as_bool())
-                    .unwrap_or(false);
-                map.insert(name.to_string(), auto);
-            }
-        }
-    }
-    map
-}
-
 /// 启停 skill：DB 状态 + 写穿 WB「允许模型自动调用」（备份 → 原子写）。
 /// ZCode 无 per-skill 禁用机制，不写 ZCode 侧；返回同步结果消息。
 #[tauri::command]
@@ -289,190 +272,19 @@ pub fn set_skill_enabled(
         );
         Ok(())
     })?;
-    sync_wb_skill_invocation(&store_state, &name, enabled)
-}
-
-/// WB 开关同步：写全部账号×scope 的 skills-installed-store.json
-fn sync_wb_skill_invocation(
-    store_state: &Store,
-    name: &str,
-    enabled: bool,
-) -> Result<String, String> {
-    let stores = wb::skill_toggle_stores();
-    if stores.is_empty() {
-        return Ok("WB 未安装或无技能存储，仅更新 AgentHub 记录".into());
-    }
-    let backups = store::backups_dir().join("wb-skill-toggle");
-    let mut touched = 0usize;
-    let mut seen = false;
-    for path in &stores {
-        let Some(bytes) = fsutil::read_opt(path) else { continue };
-        let Ok(mut v) = serde_json::from_slice::<serde_json::Value>(&bytes) else { continue };
-        let mut changed = false;
-        if let Some(obj) = v.as_object_mut() {
-            for node in obj.values_mut() {
-                let Some(data) = node.get_mut("data").and_then(|d| d.as_array_mut()) else {
-                    continue;
-                };
-                for e in data.iter_mut() {
-                    if e.get("name").and_then(|n| n.as_str()) != Some(name) {
-                        continue;
-                    }
-                    seen = true;
-                    if e.get("disableModelInvocation").and_then(|b| b.as_bool()) != Some(!enabled) {
-                        if let Some(em) = e.as_object_mut() {
-                            em.insert(
-                                "disableModelInvocation".into(),
-                                serde_json::json!(!enabled),
-                            );
-                            changed = true;
-                        }
-                    }
-                }
-            }
-        }
-        if changed {
-            fsutil::backup_file(path, &backups)?;
-            fsutil::atomic_write(
-                path,
-                serde_json::to_vec_pretty(&v)
-                    .map_err(|e| e.to_string())?
-                    .as_slice(),
-            )?;
-            touched += 1;
+    // 端侧联动聚合（如 WB 写穿自身 skills-installed-store.json），core 不感知具体端
+    let mut notes: Vec<String> = Vec::new();
+    for a in adapters::registry() {
+        if let Some(msg) = a.on_skill_enabled(&store_state, &name, enabled)? {
+            notes.push(msg);
         }
     }
-    store_state.with(|conn| {
-        store::log_op(
-            conn,
-            "skill.wb_toggle",
-            name,
-            serde_json::json!({ "enabled": enabled, "touched": touched }),
-        );
-        Ok(())
-    })?;
-    if !seen {
-        return Ok(format!(
-            "WB 存储未收录「{name}」（先在 WB 打开一次技能面板再试），本次仅更新 AgentHub 记录"
-        ));
+    if notes.is_empty() {
+        Ok("已更新 AgentHub 记录".into())
+    } else {
+        Ok(notes.join("；"))
     }
-    Ok(format!(
-        "已同步 WB：「{name}」自动调用 {}（更新 {touched} 处存储，原文件已备份）",
-        if enabled { "开" } else { "关" }
-    ))
 }
-
-#[derive(Debug, Serialize)]
-pub struct PluginSkillItem {
-    /// 运行时技能名（plugin:目录名，如 github:commit）
-    pub name: String,
-    pub plugin: String,
-    pub plugin_version: String,
-    pub description: Option<String>,
-    /// 插件本身是否在 cli/config.json enabledPlugins 中启用
-    pub plugin_enabled: bool,
-}
-
-/// 取 YAML frontmatter 字段；折叠标记（> / >- / |）续收缩进行
-fn fm_get(fm: &str, key: &str) -> Option<String> {
-    let prefix = format!("{key}:");
-    let mut acc: Option<String> = None;
-    for line in fm.lines() {
-        if let Some(v) = line.strip_prefix(&prefix) {
-            acc = Some(v.trim().trim_start_matches(['>', '-']).trim().to_string());
-        } else if acc.is_some() {
-            if line.starts_with(' ') {
-                let t = line.trim();
-                if !t.is_empty() {
-                    let cur = acc.unwrap_or_default();
-                    acc = Some(if cur.is_empty() {
-                        t.to_string()
-                    } else {
-                        format!("{cur} {t}")
-                    });
-                }
-            } else if !line.trim().is_empty() {
-                break;
-            }
-        }
-    }
-    acc.filter(|s| !s.is_empty())
-}
-
-/// ZCode 插件自带技能（只读展示）：插件体系不经中央仓库分发，AgentHub 仅列出全貌
-#[tauri::command]
-pub fn zcode_plugin_skills() -> Result<Vec<PluginSkillItem>, String> {
-    let mut out: Vec<PluginSkillItem> = Vec::new();
-    let Some(bytes) = fsutil::read_opt(&zcode::installed_plugins_json()) else {
-        return Ok(out);
-    };
-    let v: serde_json::Value =
-        serde_json::from_slice(&bytes).map_err(|e| format!("installed_plugins.json 解析失败: {e}"))?;
-    let Some(plugins) = v.get("plugins").and_then(|x| x.as_array()) else {
-        return Ok(out);
-    };
-    // 插件启用状态来自 cli/config.json plugins.enabledPlugins
-    let enabled_map: HashMap<String, bool> = fsutil::read_opt(&zcode::cli_config())
-        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-        .and_then(|cfg| {
-            cfg.get("plugins")
-                .and_then(|p| p.get("enabledPlugins"))
-                .and_then(|m| m.as_object())
-                .cloned()
-        })
-        .map(|m| {
-            m.into_iter()
-                .map(|(k, val)| (k, val.as_bool().unwrap_or(false)))
-                .collect()
-        })
-        .unwrap_or_default();
-    for p in plugins {
-        let id = p.get("id").and_then(|x| x.as_str()).unwrap_or("");
-        let name = p.get("name").and_then(|x| x.as_str()).unwrap_or("");
-        let version = p.get("version").and_then(|x| x.as_str()).unwrap_or("");
-        let install = p.get("installPath").and_then(|x| x.as_str()).unwrap_or("");
-        if id.is_empty() || name.is_empty() || install.is_empty() {
-            continue;
-        }
-        let install_path = std::path::PathBuf::from(install);
-        // manifest 里的 skills 相对路径（缺省 ./skills）
-        let skills_rel = fsutil::read_opt(&install_path.join(".claude-plugin").join("plugin.json"))
-            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-            .and_then(|m| {
-                m.get("skills")
-                    .and_then(|s| s.as_str())
-                    .map(|s| s.trim_start_matches("./").to_string())
-            })
-            .unwrap_or_else(|| "skills".into());
-        let Ok(dirs) = std::fs::read_dir(install_path.join(skills_rel)) else {
-            continue;
-        };
-        for d in dirs.flatten() {
-            if !d.path().is_dir() {
-                continue;
-            }
-            let dir_name = d.file_name().to_string_lossy().to_string();
-            let Some(raw) = fsutil::read_opt(&d.path().join("SKILL.md")) else {
-                continue;
-            };
-            let content = String::from_utf8_lossy(&raw);
-            let fm = content
-                .strip_prefix("---")
-                .and_then(|rest| rest.find("\n---").map(|end| &rest[..end]))
-                .unwrap_or("");
-            out.push(PluginSkillItem {
-                name: format!("{name}:{dir_name}"),
-                plugin: name.to_string(),
-                plugin_version: version.to_string(),
-                description: fm_get(fm, "description"),
-                plugin_enabled: enabled_map.get(id).copied().unwrap_or(false),
-            });
-        }
-    }
-    out.sort_by(|a, b| a.plugin.cmp(&b.plugin).then(a.name.cmp(&b.name)));
-    Ok(out)
-}
-
 /// skill 引用移除：链接直接删；实目录（diverged，可能含未同步内容）先备份再移除
 fn remove_skill_ref(target: &std::path::Path, backups: &std::path::Path) -> Result<(), String> {
     if fsutil::is_link(target) {

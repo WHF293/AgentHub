@@ -10,11 +10,14 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::adapters::{
+use agenthub_core::adapters::{
+    MemoryTarget,
     agent_home, eq_path, link_status_for, AgentAdapter, AgentCaps, McpConfig, McpEntry, McpLive,
     SkillsLink,
 };
-use crate::fsutil::{self, LinkMode, Res};
+use agenthub_core::fsutil::{self, LinkMode, Res};
+use agenthub_core::store::Store;
+use tauri::AppHandle;
 
 pub fn dir() -> PathBuf {
     agent_home().join(".zcode")
@@ -100,7 +103,7 @@ impl AgentAdapter for ZcodeAdapter {
         }
         if zdir.is_dir() {
             // 防御：确认目录内所有实目录 skill 都已入中央仓库再腾挪
-            for info in crate::adapters::scan_skills_dir(&zdir) {
+            for info in agenthub_core::adapters::scan_skills_dir(&zdir) {
                 if info.importable && !central.join(&info.name).is_dir() {
                     let dest = central.join(&info.name);
                     fsutil::copy_dir_recursive(Path::new(&info.path), &dest)
@@ -194,4 +197,55 @@ impl AgentAdapter for ZcodeAdapter {
         entry.insert("enabled".into(), json!(e.enabled));
         Some(Value::Object(entry))
     }
+
+    // ── 用量采集域 ──
+
+    fn collect_usage(&self, store: &Store, app: Option<&AppHandle>) -> Res<usize> {
+        crate::usage_zcode::collect(store, app)
+    }
+
+    // ── Memory 域 ──
+
+    fn memory_targets(&self) -> Vec<MemoryTarget> {
+        vec![MemoryTarget {
+            path: agents_md(),
+            id: "zcode-agents".into(),
+            label: "ZCode · AGENTS.md".into(),
+            readonly_default: true,
+        }]
+    }
+    fn data_dirs(&self) -> Vec<PathBuf> {
+        vec![dir()]
+    }
+    /// 只读守卫：AGENTS.md 默认只读（避免与 ZCode 自身写入冲突），需显式解锁
+    fn memory_write_guard(&self, path: &Path, unlock: bool) -> Res<()> {
+        if path == agents_md() && !unlock {
+            return Err("ZCode AGENTS.md 默认只读（避免与 ZCode 自身写入冲突），请先解锁".into());
+        }
+        Ok(())
+    }
+    /// 项目目录发现：ZCode recentProjects（字符串数组）
+    fn discover_project_dirs(&self) -> Vec<String> {
+        let mut paths: Vec<String> = Vec::new();
+        let Ok(bytes) = std::fs::read(v2_setting()) else {
+            return paths;
+        };
+        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+            if let Some(arr) = v.get("recentProjects").and_then(|x| x.as_array()) {
+                for p in arr {
+                    if let Some(s) = p.as_str() {
+                        paths.push(s.to_string());
+                    }
+                }
+            }
+        }
+        paths
+    }
+    /// 项目指令文件：AGENTS.md
+    fn instruction_file(&self) -> Option<(&'static str, &'static str)> {
+        Some(("AGENTS.md", "zcode"))
+    }
 }
+
+/// 注册表单例（src-tauri 组装层收进 core 注册表）
+pub static ZCODE_ADAPTER: ZcodeAdapter = ZcodeAdapter;

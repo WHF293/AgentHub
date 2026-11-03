@@ -5,6 +5,7 @@ fn main() {
     // 无头模式：agenthub.exe --migrate [--link-mode symlink|junction|copy]
     // 不启 GUI，直接执行 M1 迁移并打印 JSON 报告（用于验收 / 冒烟）
     let args: Vec<String> = std::env::args().collect();
+    agenthub_lib::init_plugins();
     if args.iter().any(|a| a == "--migrate") {
         let mode = args
             .iter()
@@ -49,12 +50,12 @@ fn main() {
         .position(|a| a == "--fetch-models")
         .and_then(|i| args.get(i + 1))
     {
-        let provs = agenthub_lib::providers::read_zcode_providers().expect("读 provider 失败");
+        let provs = agenthub_plugin_zcode::provider_zcode::read_zcode_providers().expect("读 provider 失败");
         let p = provs
             .iter()
             .find(|p| p.id == *pid)
             .unwrap_or_else(|| panic!("provider 不存在：{pid}"));
-        let key = agenthub_lib::providers::resolve_api_key(pid, None).expect("key 缺失");
+        let key = agenthub_plugin_zcode::provider_zcode::resolve_api_key(pid, None).expect("key 缺失");
         let r = agenthub_lib::modelfetch::fetch_models(&p.kind, &p.base_url, &key, None);
         println!(
             "{}",
@@ -65,7 +66,7 @@ fn main() {
     // 无头模式：agenthub.exe --wb-status  账号岛状态探测（含槽位/进程/当前 uid）
     if args.iter().any(|a| a == "--wb-status") {
         let store = agenthub_lib::store::Store::open().expect("初始化 ~/.agenthub 失败");
-        let o = agenthub_lib::account::overview(&store).expect("wb overview 失败");
+        let o = agenthub_plugin_workbuddy::account::overview(&store).expect("wb overview 失败");
         println!(
             "{}",
             serde_json::to_string_pretty(&o).expect("serialize")
@@ -79,7 +80,7 @@ fn main() {
         .and_then(|i| args.get(i + 1))
     {
         let store = agenthub_lib::store::Store::open().expect("初始化 ~/.agenthub 失败");
-        let slot = agenthub_lib::account::save_slot(&store, label).expect("保存槽位失败");
+        let slot = agenthub_plugin_workbuddy::account::save_slot(&store, label).expect("保存槽位失败");
         println!(
             "{}",
             serde_json::to_string_pretty(&slot).expect("serialize")
@@ -104,7 +105,7 @@ fn main() {
     if let Some(pos) = args.iter().position(|a| a == "--import-ccswitch") {
         let path = args.get(pos + 1).expect("缺备份文件路径").clone();
         let store = agenthub_lib::store::Store::open().expect("初始化 ~/.agenthub 失败");
-        match agenthub_lib::ccsimport::import_backup(&store, &path) {
+        match agenthub_plugin_claude::ccsimport::import_backup(&store, &path) {
             Ok(report) => {
                 println!(
                     "{}",
@@ -128,13 +129,13 @@ fn main() {
                 .cloned()
         };
         let base_url = get("--base-url").unwrap_or_default();
-        let input = agenthub_lib::providers::ClaudeSaveInput {
+        let input = agenthub_plugin_claude::provider_claude::ClaudeSaveInput {
             base_url,
             api_key: get("--api-key"),
             model: get("--model"),
             small_fast_model: get("--small-model"),
         };
-        match agenthub_lib::providers::write_claude_provider(&input) {
+        match agenthub_plugin_claude::provider_claude::write_claude_provider(&input) {
             Ok(msg) => println!("{msg}"),
             Err(e) => {
                 eprintln!("claude-setup 失败: {e}");
@@ -195,9 +196,9 @@ fn main() {
     // 无头模式：agenthub.exe --wb-sessions  列出当前账号会话（验证 sessions.rs 会话列出）
     if args.iter().any(|a| a == "--wb-sessions") {
         let store = agenthub_lib::store::Store::open().expect("初始化 ~/.agenthub 失败");
-        let o = agenthub_lib::account::overview(&store).expect("wb overview 失败");
+        let o = agenthub_plugin_workbuddy::account::overview(&store).expect("wb overview 失败");
         let uid = o.current.uid.clone();
-        let list = agenthub_lib::sessions::list_sessions(&store, &uid).expect("会话列出失败");
+        let list = agenthub_plugin_workbuddy::sessions::list_sessions(&store, &uid).expect("会话列出失败");
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
@@ -222,7 +223,7 @@ fn main() {
         let store = agenthub_lib::store::Store::open().expect("初始化 ~/.agenthub 失败");
         let backup = agenthub_lib::store::backups_dir().join("session-test");
         for tuid in &tuids {
-            let results = agenthub_lib::sessions::copy_sessions(&store, &[sid.clone()], tuid, &backup);
+            let results = agenthub_plugin_workbuddy::sessions::copy_sessions(&store, &[sid.clone()], tuid, &backup);
             println!("== target {tuid} ==");
             println!("{}", serde_json::to_string_pretty(&results).expect("serialize"));
         }
@@ -232,7 +233,7 @@ fn main() {
     // 注意：受 ~/.agenthub/keys/wb-checkin-auto 开关与插件启用门控约束，与 GUI 同一开关
     if args.iter().any(|a| a == "--checkin") {
         let store = agenthub_lib::store::Store::open().expect("初始化 ~/.agenthub 失败");
-        let results = agenthub_lib::checkin::auto_checkin_all(&store).expect("签到失败");
+        let results = agenthub_plugin_workbuddy::checkin::auto_checkin_all(&store).expect("签到失败");
         println!(
             "{}",
             serde_json::to_string_pretty(&results).expect("serialize")
@@ -245,20 +246,20 @@ fn main() {
         let slot_id = args.get(pos + 1).expect("缺 slot-id（见 --wb-status 输出）").clone();
         let force = args.iter().any(|a| a == "--force");
         let store = agenthub_lib::store::Store::open().expect("初始化 ~/.agenthub 失败");
-        if force && agenthub_lib::account::process_running() {
-            if let Err(e) = agenthub_lib::account::kill_process() {
+        if force && agenthub_plugin_workbuddy::account::process_running() {
+            if let Err(e) = agenthub_plugin_workbuddy::account::kill_process() {
                 eprintln!("结束 WB 进程失败: {e}");
                 std::process::exit(1);
             }
             // 等 taskkill 落地，最多 5 秒；switch_account 内部还会再检测一次
             for _ in 0..10 {
-                if !agenthub_lib::account::process_running() {
+                if !agenthub_plugin_workbuddy::account::process_running() {
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(500));
             }
         }
-        match agenthub_lib::account::switch_account(&store, &slot_id, &[]) {
+        match agenthub_plugin_workbuddy::account::switch_account(&store, &slot_id, &[]) {
             Ok(report) => {
                 println!(
                     "{}",
