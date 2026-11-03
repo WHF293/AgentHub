@@ -1,0 +1,5 @@
+# workspace 化后仍把编译产物钉在 src-tauri/target：
+# CI 产物路径（src-tauri/target/release/bundle/nsis）、rust-cache（workspaces: src-tauri）
+# 与本地脚本全部保持原样，零改动。
+[build]
+target-dir = "src-tauri/target"

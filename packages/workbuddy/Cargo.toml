@@ -1,0 +1,12 @@
+[package]
+name = "agenthub-plugin-workbuddy"
+version = "0.1.0"
+description = "AgentHub 插件：WorkBuddy 适配器与专属功能"
+edition = "2021"
+
+[lib]
+name = "agenthub_plugin_workbuddy"
+path = "src/lib.rs"
+
+[dependencies]
+agenthub-core = { path = "../core" }

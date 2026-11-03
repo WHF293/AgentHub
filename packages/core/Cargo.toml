@@ -1,0 +1,20 @@
+[package]
+name = "agenthub-core"
+version = "0.1.0"
+description = "AgentHub 共享内核：适配器 trait / 注册表 / 存储 / 引擎"
+edition = "2021"
+
+[lib]
+name = "agenthub_core"
+path = "src/lib.rs"
+
+[dependencies]
+tauri = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rusqlite = { workspace = true }
+chrono = { workspace = true }
+reqwest = { workspace = true }
+sha2 = { workspace = true }
+aes-gcm = { workspace = true }
+base64 = { workspace = true }

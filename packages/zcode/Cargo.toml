@@ -1,0 +1,12 @@
+[package]
+name = "agenthub-plugin-zcode"
+version = "0.1.0"
+description = "AgentHub 插件：ZCode 适配器与专属功能"
+edition = "2021"
+
+[lib]
+name = "agenthub_plugin_zcode"
+path = "src/lib.rs"
+
+[dependencies]
+agenthub-core = { path = "../core" }

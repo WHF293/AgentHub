@@ -1,7 +1,7 @@
 [package]
 name = "agenthub"
 version = "0.1.0"
-description = "AgentHub — AI Agent 统一管理工具（WorkBuddy / ZCode）"
+description = "AgentHub — AI Agent 统一管理工具（WorkBuddy / ZCode / Claude Code）"
 edition = "2021"
 
 [lib]
@@ -12,21 +12,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
+# 应用壳：只依赖内核与插件包 + tauri 外壳能力；业务模块全部在 packages/*（P2 起分域）
+agenthub-core = { path = "../packages/core" }
+tauri = { workspace = true, features = ["tray-icon"] }
 tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-rusqlite = { version = "0.32", features = ["bundled"] }
-chrono = "0.4"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "socks"] }
-sha2 = "0.10"
-aes-gcm = "0.10"
-base64 = "0.22"
-
-[profile.release]
-codegen-units = 1
-lto = true
-opt-level = "s"
-panic = "abort"
-strip = true
+serde_json = { workspace = true }

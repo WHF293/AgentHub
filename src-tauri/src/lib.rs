@@ -1,33 +1,16 @@
-pub mod account;
-pub mod adapters;
-pub mod ccsimport;
-pub mod checkin;
-pub mod commands;
-pub mod fsutil;
-pub mod mcp;
-pub mod market;
-pub mod memory;
-pub mod migrate;
-pub mod modelfetch;
-pub mod plugins;
-pub mod providers;
-pub mod quota;
-pub mod sessions;
-pub mod store;
-pub mod update;
-pub mod usage;
-pub mod zaccount;
+//! AgentHub 应用壳 —— tauri 窗口/托盘/单实例/自启 + IPC 命令装配。
+//! 全部业务模块在 agenthub-core（P2 起各 agent 域拆入 packages/<id> 插件包），
+//! 这里 glob re-export 保持 `agenthub_lib::<mod>` 路径对 main.rs 无头分发不变。
 
-use std::sync::atomic::{AtomicBool, Ordering};
+pub use agenthub_core::*;
+
+use std::sync::atomic::Ordering;
 
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager,
 };
-
-/// 关闭行为：true = 关到托盘（默认），false = 直接退出（设置岛可切换）
-pub static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(true);
 
 /// 主窗口显出并聚焦（托盘菜单 / 双击托盘共用）
 fn show_main(app: &tauri::AppHandle) {

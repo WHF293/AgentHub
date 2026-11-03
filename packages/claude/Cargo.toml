@@ -1,0 +1,12 @@
+[package]
+name = "agenthub-plugin-claude"
+version = "0.1.0"
+description = "AgentHub 插件：Claude Code 适配器与专属功能"
+edition = "2021"
+
+[lib]
+name = "agenthub_plugin_claude"
+path = "src/lib.rs"
+
+[dependencies]
+agenthub-core = { path = "../core" }
