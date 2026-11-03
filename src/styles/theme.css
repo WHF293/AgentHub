@@ -8,6 +8,7 @@
   --color-primary-soft: #ddf3e9;
   --color-agent-wb: #2e9e74;
   --color-agent-zcode: #4aa3df;
+  --color-agent-claude: #d97757;
   /* 日历热力图 5 档（低 → 高）：蓝灰起步、绿色收顶 */
   --heat-0: #edf3f7;
   --heat-1: #d8eaf6;
@@ -33,6 +34,7 @@ body.dark {
   --color-primary-soft: #1d3629;
   --color-agent-wb: #4cc79c;
   --color-agent-zcode: #5cb8e8;
+  --color-agent-claude: #e88b6a;
   --heat-0: #232b30;
   --heat-1: #1d3542;
   --heat-2: #1e5140;
@@ -116,6 +118,11 @@ body {
 .chip.wb {
   background: color-mix(in srgb, var(--color-agent-wb) 14%, transparent);
   color: var(--color-agent-wb);
+}
+/* Claude Code 身份 chip：跟随可配置的 --color-agent-claude（Plugin 岛可自定义） */
+.chip.claude {
+  background: color-mix(in srgb, var(--color-agent-claude) 14%, transparent);
+  color: var(--color-agent-claude);
 }
 .btn {
   display: inline-flex;

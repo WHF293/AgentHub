@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { agentColor as agentColorOf } from '../agents';
+import { agentChipClass, agentColor as agentColorOf } from '../agents';
 import * as echarts from 'echarts/core';
 import {
   GridComponent,
@@ -37,7 +37,7 @@ echarts.use([
 
 type Granularity = 'day' | 'week' | 'month' | 'year' | 'all';
 type ViewMode = 'calendar' | 'chart';
-type AgentFilter = 'all' | 'workbuddy' | 'zcode';
+type AgentFilter = 'all' | 'workbuddy' | 'zcode' | 'claude';
 /** 范围筛选：agent 维度 + 账号维度（account='all' 表示该 Agent 全部账号） */
 interface Scope {
   agent: AgentFilter;
@@ -48,7 +48,7 @@ const matchScope = (agent: string, account: string, s: Scope): boolean =>
   (s.agent === 'all' || agent === s.agent) && (s.account === 'all' || account === s.account);
 const scopeEq = (a: Scope, b: Scope): boolean => a.agent === b.agent && a.account === b.account;
 
-const AGENT_LABEL: Record<string, string> = { zcode: 'ZCode', workbuddy: 'WorkBuddy' };
+const AGENT_LABEL: Record<string, string> = { zcode: 'ZCode', workbuddy: 'WorkBuddy', claude: 'Claude Code' };
 /** 双 Agent 身份色：读 Plugin 岛可配置色（自定义优先，回落注册表默认）；汇总 = 主绿 */
 const agentColor = (agent: string) =>
   agent === 'all' ? '#3EB489' : agentColorOf(agent);
@@ -68,6 +68,7 @@ const agentShades = (id: string): string[] => {
 const AGENT_PALETTE: Record<string, string[]> = {
   workbuddy: agentShades('workbuddy'),
   zcode: agentShades('zcode'),
+  claude: agentShades('claude'),
 };
 
 const fmtTok = (n: number): string => {
@@ -92,7 +93,7 @@ const themeColors = () => {
 const modelColorFn = () => {
   const counters: Record<string, number> = {};
   return (agent: string) => {
-    const pal = AGENT_PALETTE[agent] ?? ['#3EB489', '#6FC7A5', '#20785A', '#A3DDC6'];
+    const pal = AGENT_PALETTE[agent] ?? agentShades(agent);
     const i = counters[agent] ?? 0;
     counters[agent] = i + 1;
     return pal[i % pal.length];
@@ -331,10 +332,10 @@ export function UsagePage() {
       .catch((e) => setError(String(e)));
   }, [overviewRange, matrix]);
 
-  /** 账户 chip 文案：WB 用槽位 label（无则 uid 前 8 位），ZCode 单账号 */
+  /** 账户 chip 文案：WB 多账号用槽位 label（无则 uid 前 8 位）；其余单账号端直接用 agent 名 */
   const accountLabel = useCallback(
     (agent: string, account: string): string => {
-      if (agent === 'zcode') return 'ZCode';
+      if (agent !== 'workbuddy') return AGENT_LABEL[agent] ?? agent;
       const lb = slotLabels[account];
       return `WB·${lb && lb.trim() ? lb : account.slice(0, 8) || '未归属'}`;
     },
@@ -346,14 +347,36 @@ export function UsagePage() {
     scope.account !== 'all'
       ? accountLabel(scope.agent, scope.account)
       : scope.agent === 'all'
-        ? '双 Agent'
-        : AGENT_LABEL[scope.agent];
+        ? '全部 Agent'
+        : AGENT_LABEL[scope.agent] ?? scope.agent;
 
   // agent 过滤后的聚合
   const filtered = useMemo(() => {
     const rows = (matrix ?? []).filter((c) => matchScope(c.agent, c.account, scope));
     return buildBuckets(rows);
   }, [matrix, scope]);
+
+  // 切月联动：翻月/下钻只写 dayYm，这里把选中日钳进新月份，24h 曲线、标题、日格高亮同步跟随
+  useEffect(() => {
+    if (selectedDate.slice(0, 7) === dayYm) return; // 已在当月（含点日格手动选日）不动
+    if (dayYm === todayYm()) {
+      setSelectedDate(todayStr()); // 翘回本月 = 今天，与初始态一致
+      return;
+    }
+    // 历史月：选该月用量最大的日（与日历格同一套 scope 过滤口径），全空月回落 1 号
+    let best: string | null = null;
+    let bestTok = -1;
+    for (const [date, b] of filtered.byDay) {
+      if (date.startsWith(dayYm)) {
+        const tok = b.details.reduce((s, x) => s + x.tokens, 0);
+        if (tok > bestTok) {
+          bestTok = tok;
+          best = date;
+        }
+      }
+    }
+    setSelectedDate(best ?? `${dayYm}-01`);
+  }, [dayYm, filtered, selectedDate]);
 
   const totals = useMemo(() => {
     const list = (overview?.totals ?? []).filter((t) => matchScope(t.agent, t.account, scope));
@@ -366,6 +389,19 @@ export function UsagePage() {
       credit: sum((t) => t.credit),
     };
   }, [overview, scope]);
+
+  /** 出现过用量的 agent 列表（数据驱动：WB/ZCode/Claude 及未来扩展自动进 chips 与曲线 series） */
+  const agentIds = useMemo(() => {
+    const s = new Set<string>();
+    for (const t of overview?.totals ?? []) s.add(t.agent);
+    for (const a of accounts) s.add(a.agent);
+    const prio = ['workbuddy', 'zcode', 'claude'];
+    return [...s].sort(
+      (x, y) =>
+        (prio.indexOf(x) === -1 ? 99 : prio.indexOf(x)) -
+        (prio.indexOf(y) === -1 ? 99 : prio.indexOf(y)),
+    );
+  }, [overview, accounts]);
 
   // ── 日历模式渲染数据 ──
   const maxOfDay = Math.max(1, ...[...filtered.byDay.values()].map((b) => b.tokens));
@@ -395,7 +431,7 @@ export function UsagePage() {
   // ── 曲线模式（echarts）：x = 时间（按天/按月/按年），堆叠柱 + hover 明细 ──
   const chartRef = useEChart(() => {
     const c = themeColors();
-    const agents = scope.agent === 'all' ? ['workbuddy', 'zcode'] : [scope.agent];
+    const agents = scope.agent === 'all' ? agentIds : [scope.agent];
     const seriesName = (a: string) =>
       scope.account !== 'all' ? accountLabel(a, scope.account) : (AGENT_LABEL[a] ?? a);
     let cats: string[] = [];
@@ -506,7 +542,7 @@ export function UsagePage() {
         barMaxWidth: 32,
       })),
     } satisfies echarts.EChartsCoreOption;
-  }, [granularity, filtered, dayYm, monY, scope, accountLabel]);
+  }, [granularity, filtered, dayYm, monY, scope, accountLabel, agentIds]);
 
   const granularityChip = (g: Granularity, label: string) => (
     <span
@@ -540,7 +576,7 @@ export function UsagePage() {
     <div>
       <PageHeader
         title="用量分析"
-        sub="请求级真实 usage · 历史永久留存 ~/.agenthub（卸载双 Agent 后仍可查）· 正文永不入库"
+        sub="请求级真实 usage · 历史永久留存 ~/.agenthub（卸载 Agent 后仍可查）· 正文永不入库"
       />
 
       {/* 首次全量提取进度条 */}
@@ -610,13 +646,12 @@ export function UsagePage() {
         {(
           [
             [{ agent: 'all', account: 'all' }, '汇总'],
-            [{ agent: 'workbuddy', account: 'all' }, 'WB 汇总'],
-            [{ agent: 'zcode', account: 'all' }, 'ZCode 汇总'],
+            ...agentIds.map((a) => [{ agent: a, account: 'all' }, `${AGENT_LABEL[a] ?? a} 汇总`]),
           ] as [Scope, string][]
         ).map(([v, label]) => (
           <span
             key={label}
-            className={`chip ${scopeEq(scope, v) ? (v.agent === 'zcode' ? 'zc' : v.agent === 'workbuddy' ? 'wb' : 'ok') : 'off'}`}
+            className={`chip ${scopeEq(scope, v) ? agentChipClass(v.agent) : 'off'}`}
             style={{ cursor: 'pointer', fontSize: 11.5, padding: '4px 12px' }}
             onClick={() => setScope(v)}
           >
@@ -632,7 +667,7 @@ export function UsagePage() {
           return (
             <span
               key={`${a.agent}:${a.account}`}
-              className={`chip ${active ? (a.agent === 'zcode' ? 'zc' : a.agent === 'workbuddy' ? 'wb' : 'ok') : 'off'}`}
+              className={`chip ${active ? agentChipClass(a.agent) : 'off'}`}
               style={{ cursor: 'pointer', fontSize: 11.5, padding: '4px 12px' }}
               title={`${AGENT_LABEL[a.agent] ?? a.agent} · ${a.calls} 次调用`}
               onClick={() => setScope(s)}

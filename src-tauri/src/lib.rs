@@ -1,5 +1,6 @@
 pub mod account;
 pub mod adapters;
+pub mod ccsimport;
 pub mod checkin;
 pub mod commands;
 pub mod fsutil;
@@ -150,6 +151,9 @@ pub fn run() {
             providers::provider_save,
             providers::provider_delete,
             providers::provider_set_default,
+            providers::claude_providers_overview,
+            providers::claude_provider_fetch_models,
+            providers::claude_provider_save,
             account::wb_overview,
             account::wb_save_slot,
             account::wb_switch,

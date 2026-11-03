@@ -34,6 +34,16 @@ export const AGENTS: Record<string, AgentMeta> = {
     defaultColor: '#4AA3DF',
     chipClass: 'zc',
   },
+  // Claude Code 插件（adapters/claude.rs）：正式适配器，参与 Skills/MCP/用量采集；
+  // 同 id 承接 cc-switch 备份导入（--import-ccswitch）的历史用量，天然合并展示
+  claude: {
+    id: 'claude',
+    name: 'Claude Code',
+    accentVar: 'var(--color-agent-claude)',
+    colorVar: '--color-agent-claude',
+    defaultColor: '#D97757',
+    chipClass: 'claude',
+  },
 };
 
 /** 按 id 取元信息；未注册的 agent（未来社区适配器）回落中性展示 */

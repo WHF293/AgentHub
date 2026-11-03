@@ -53,6 +53,9 @@ agenthub.exe --wb-status / --wb-save-slot <label>            # 账号岛探测/�
 agenthub.exe --wb-sessions                                   # 列当前账号会话（sessions.rs）
 agenthub.exe --wb-copy-test <session-id> <target-uid>...    # 会话复制演练，支持多目标（配 USERPROFILE 重定向沙盒）
 agenthub.exe --usage-collect [range]                         # 用量双源采集 + 聚合
+agenthub.exe --claude-setup --base-url <url> --api-key <key> [--model <m>] [--small-model <m>]
+                                                             # Claude Code 模型托管一步到位（settings.json env + 跳过引导）
+agenthub.exe --import-ccswitch <备份文件路径>                 # cc-switch SQL 备份用量导入（明细+30天前日汇总，ccs: 前缀幂等）
 agenthub.exe --market-refresh                                # Skill 市场目录刷新
 agenthub.exe --bridge-test <项目路径>                        # Memory 桥接 init/sync/consolidate
 agenthub.exe --unify-memory                                  # 全局记忆统一：真身 ~/.agenthub/MEMORY.md + 双端建链
@@ -78,8 +81,9 @@ src-tauri/src/
                         mcp_servers.enabled_json 按 agent 启用态 / plugin_state 插件开关）
   adapters/             可插拔核心层：mod.rs = AgentAdapter trait（能力声明 caps + skills 域
                         链接策略/建链 + MCP 域配置形态/条目翻译）+ 静态注册表 registry()/by_id()；
-                        wb.rs / zcode.rs 各实现 trait（WB 逐项链 / ZCode 整目录链 + mcp.json
-                        disabled / config.json enabled 翻译）。社区新增 agent：实现 trait →
+                        wb.rs / zcode.rs / claude.rs 各实现 trait（WB 逐项链 / ZCode 整目录链 +
+                        Claude Code 整目录链 + mcp.json disabled / config.json enabled /
+                        claude.json mcpServers 在场即启用 翻译）。社区新增 agent：实现 trait →
                         REGISTRY 加一行 → 前端 agents.ts 补一条，引擎零改动
   plugins.rs            插件启用状态（plugin_state 表）：首次运行按安装探测自动启用（source=auto），
                         之后以用户手动开关为准持久化（source=manual）；enabled_adapters() 是

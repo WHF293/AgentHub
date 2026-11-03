@@ -32,31 +32,38 @@ pub struct PluginInfo {
     pub source: String,
 }
 
-/// 确保状态表已初始化：空表 = 首次运行，按安装探测自动启用
+/// 确保状态表已初始化：空表 = 首次运行，按安装探测自动启用；
+/// 非空表也要给「新注册的适配器」补缺行（升级新增插件后 list() 才有行可读），幂等
 fn ensure_initialized(conn: &rusqlite::Connection) -> Res<()> {
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM plugin_state", [], |row| row.get(0))
         .map_err(|e| e.to_string())?;
-    if count > 0 {
-        return Ok(());
-    }
+    let first_run = count == 0;
+    let mut detected: Vec<&'static str> = Vec::new();
     for a in adapters::registry() {
+        // 新补行的默认态按安装探测（已启用/停用的存量行不受影响，OR IGNORE 跳过）
         let enabled = a.installed();
-        conn.execute(
-            "INSERT OR IGNORE INTO plugin_state(agent, enabled, source, updated_at)
-             VALUES (?1, ?2, 'auto', datetime('now','localtime'))",
-            rusqlite::params![a.id(), enabled as i64],
-        )
-        .map_err(|e| e.to_string())?;
+        let n = conn
+            .execute(
+                "INSERT OR IGNORE INTO plugin_state(agent, enabled, source, updated_at)
+                 VALUES (?1, ?2, 'auto', datetime('now','localtime'))",
+                rusqlite::params![a.id(), enabled as i64],
+            )
+            .map_err(|e| e.to_string())?;
+        if n > 0 && enabled {
+            detected.push(a.id());
+        }
     }
-    store::log_op(
-        conn,
-        "plugins.init",
-        "plugin_state",
-        serde_json::json!({
-            "detected": adapters::registry().iter().filter(|a| a.installed()).map(|a| a.id()).collect::<Vec<_>>(),
-        }),
-    );
+    if first_run {
+        store::log_op(
+            conn,
+            "plugins.init",
+            "plugin_state",
+            serde_json::json!({
+                "detected": detected,
+            }),
+        );
+    }
     Ok(())
 }
 

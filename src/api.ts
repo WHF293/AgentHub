@@ -263,6 +263,35 @@ export const providerDelete = (id: string) => invoke<string>('provider_delete', 
 export const providerSetDefault = (family: string, key: string) =>
   invoke<void>('provider_set_default', { family, key });
 
+// ─── Claude Code 模型托管（settings.json env 块，单档直写） ───
+
+export interface ClaudeProviderLive {
+  base_url: string;
+  has_api_key: boolean;
+  model: string;
+  small_fast_model: string;
+  /** ~/.claude.json 是否已跳过首次引导 */
+  onboarding_done: boolean;
+  /** settings.json 是否已有 env 块 */
+  configured: boolean;
+}
+
+export const claudeProvidersOverview = () =>
+  invoke<ClaudeProviderLive>('claude_providers_overview');
+
+export const claudeProviderFetchModels = (input: {
+  base_url: string;
+  api_key?: string;
+  models_url?: string;
+}) => invoke<FetchResult>('claude_provider_fetch_models', { input });
+
+export const claudeProviderSave = (input: {
+  base_url: string;
+  api_key?: string;
+  model?: string;
+  small_fast_model?: string;
+}) => invoke<string>('claude_provider_save', { input });
+
 // ─── M5 WB 账号 ───
 
 export interface AccountMeta {
@@ -530,7 +559,7 @@ export interface UsageAccount {
 }
 
 export const usageCollect = () =>
-  invoke<[number, number]>('usage_collect');
+  invoke<[number, number, number]>('usage_collect');
 
 export const usageOverview = (range: string) =>
   invoke<UsageOverview>('usage_overview', { range });

@@ -8,6 +8,7 @@
 //! 共享引擎（skills 迁移、MCP 同步、插件门控）与 UI 全部按注册表与能力声明驱动，
 //! 不需要改任何引擎代码。用户的启用/停用状态存 SQLite `plugin_state`（见 plugins.rs）。
 
+pub mod claude;
 pub mod wb;
 pub mod zcode;
 
@@ -178,9 +179,10 @@ pub trait AgentAdapter: Sync + Send {
 
 pub static WORKBUDDY: wb::WorkBuddyAdapter = wb::WorkBuddyAdapter;
 pub static ZCODE: zcode::ZcodeAdapter = zcode::ZcodeAdapter;
+pub static CLAUDE: claude::ClaudeAdapter = claude::ClaudeAdapter;
 
 /// 内置适配器注册表（社区新增 agent 在此追加一行 + lib.rs 注册模块）
-static REGISTRY: [&'static dyn AgentAdapter; 2] = [&WORKBUDDY, &ZCODE];
+static REGISTRY: [&'static dyn AgentAdapter; 3] = [&WORKBUDDY, &ZCODE, &CLAUDE];
 
 /// 全部已注册适配器（注册表顺序 = WB 优先，收编冲突时取先者字段）
 pub fn registry() -> &'static [&'static dyn AgentAdapter] {

@@ -1,10 +1,14 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
+  claudeProviderFetchModels,
+  claudeProviderSave,
+  claudeProvidersOverview,
   providerDelete,
   providerFetchModels,
   providerSave,
   providerSetDefault,
   providersOverview,
+  type ClaudeProviderLive,
   type FetchResult,
   type ProvidersOverview,
   type ZcodeProviderLive,
@@ -341,6 +345,292 @@ function ProviderModal({
   );
 }
 
+/** Claude Code 模型托管编辑（settings.json env 单档；模型值手动配置，不预填任何官方模型） */
+function ClaudeModal({
+  initial,
+  onClose,
+  onSaved,
+}: {
+  initial: ClaudeProviderLive;
+  onClose: () => void;
+  onSaved: (message: string) => void;
+}) {
+  const [baseUrl, setBaseUrl] = useState(initial.base_url);
+  const [apiKey, setApiKey] = useState('');
+  const [model, setModel] = useState(initial.model);
+  const [smallModel, setSmallModel] = useState(initial.small_fast_model);
+  const [fetched, setFetched] = useState<FetchResult | null>(null);
+  const [fetching, setFetching] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [showKey, setShowKey] = useState(false);
+  const [presetKey, setPresetKey] = useState('custom');
+  const claudePresets = PRESETS.filter((p) => p.key === 'custom' || p.kind === 'anthropic');
+
+  const applyPreset = (key: string) => {
+    setPresetKey(key);
+    const preset = claudePresets.find((p) => p.key === key);
+    if (preset?.base) setBaseUrl(preset.base);
+  };
+
+  const doFetch = async () => {
+    setErr(null);
+    setFetching(true);
+    try {
+      const r = await claudeProviderFetchModels({
+        base_url: baseUrl,
+        api_key: apiKey || undefined,
+      });
+      setFetched(r);
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setFetching(false);
+    }
+  };
+
+  const submit = async () => {
+    setErr(null);
+    if (!baseUrl.trim()) {
+      setErr('接口地址必填');
+      return;
+    }
+    setSaving(true);
+    try {
+      // model/小模型始终随当前值写入（空串 = 清除该键）；key 留空 = 掩码保存不修改
+      const msg = await claudeProviderSave({
+        base_url: baseUrl.trim(),
+        api_key: apiKey || undefined,
+        model,
+        small_fast_model: smallModel,
+      });
+      onSaved(msg);
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(0,0,0,.25)',
+        zIndex: 100,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+      }}
+      onClick={onClose}
+    >
+      <div
+        className="card"
+        style={{ width: 620, maxHeight: '86vh', overflow: 'auto', cursor: 'default' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between">
+          <b style={{ fontSize: 14 }}>Claude Code 模型托管（~/.claude/settings.json env）</b>
+          <span style={{ color: 'var(--color-text-3)', cursor: 'pointer' }} onClick={onClose}>✕</span>
+        </div>
+
+        <div style={{ marginTop: 12 }}>
+          <div style={label}>网关预设</div>
+          <div className="flex" style={{ gap: 6, flexWrap: 'wrap' }}>
+            {claudePresets.map((preset) => (
+              <span
+                key={preset.key}
+                className={`chip ${presetKey === preset.key ? 'ok' : 'off'}`}
+                style={{ cursor: 'pointer' }}
+                onClick={() => applyPreset(preset.key)}
+              >
+                {preset.label}
+              </span>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ marginTop: 10 }}>
+          <div style={label}>接口地址（ANTHROPIC_BASE_URL）</div>
+          <input style={{ ...field, fontFamily: 'Consolas, monospace' }} value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://…/api/anthropic" />
+        </div>
+        <div style={{ marginTop: 10 }}>
+          <div style={label}>
+            API Key（ANTHROPIC_AUTH_TOKEN）
+            {initial.has_api_key && <span style={{ marginLeft: 6 }}>（已配置 ••••••••，留空 = 不修改）</span>}
+          </div>
+          <div className="flex" style={{ gap: 8 }}>
+            <div style={{ position: 'relative', flex: 1 }}>
+              <input
+                type={showKey ? 'text' : 'password'}
+                style={{ ...field, paddingRight: 30 }}
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                placeholder={initial.has_api_key ? '留空保持不变' : 'sk-…'}
+              />
+              <span
+                title={showKey ? '隐藏密钥' : '显示密钥'}
+                style={{
+                  position: 'absolute',
+                  right: 9,
+                  top: '50%',
+                  transform: 'translateY(-50%)',
+                  cursor: 'pointer',
+                  color: 'var(--color-text-3)',
+                  fontSize: 12,
+                }}
+                onClick={() => setShowKey(!showKey)}
+              >
+                {showKey ? '🙈' : '👁'}
+              </span>
+            </div>
+            <button className="btn gh" style={{ whiteSpace: 'nowrap' }} onClick={doFetch} disabled={fetching || !baseUrl.trim()}>
+              {fetching ? '拉取中…' : '⌕ 获取模型列表'}
+            </button>
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-2.5" style={{ marginTop: 10 }}>
+          <div>
+            <div style={label}>主模型（ANTHROPIC_MODEL，留空 = 清除走网关默认）</div>
+            <input style={{ ...field, fontFamily: 'Consolas, monospace' }} value={model} onChange={(e) => setModel(e.target.value)} placeholder="如 glm-5.3 / claude-sonnet-5" />
+          </div>
+          <div>
+            <div style={label}>小模型（ANTHROPIC_SMALL_FAST_MODEL，可选）</div>
+            <input style={{ ...field, fontFamily: 'Consolas, monospace' }} value={smallModel} onChange={(e) => setSmallModel(e.target.value)} placeholder="后台任务用，如 glm-5.3-flash" />
+          </div>
+        </div>
+
+        {fetched && fetched.models.length > 0 && (
+          <>
+            <div className="flex items-center" style={{ gap: 8, margin: '12px 0 6px' }}>
+              <b style={{ fontSize: 12 }}>网关模型列表</b>
+              <span className={`chip ${fetched.suggested ? 'warn' : 'ok'}`}>
+                {fetched.suggested ? '内置推荐（网关无 /v1/models）' : `已拉取 ${fetched.models.length} 个，单击设为主模型`}
+              </span>
+              <span style={{ flex: 1 }} />
+            </div>
+            <div className="list" style={{ maxHeight: 180, overflow: 'auto', border: '1px solid var(--color-border)', borderRadius: 10 }}>
+              {fetched.models.map((m) => (
+                <div className="li" key={m} style={{ padding: '6px 12px', cursor: 'pointer' }} onClick={() => setModel(m)}>
+                  <span className={`sw${model === m ? ' on' : ' small'}`} />
+                  <div className="nm" style={{ fontSize: 11.5, fontFamily: 'Consolas, monospace' }}>{m}</div>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+
+        {err && (
+          <div style={{ fontSize: 12, color: 'var(--color-danger)', marginTop: 8, whiteSpace: 'pre-wrap' }}>{err}</div>
+        )}
+        <div className="flex" style={{ gap: 8, justifyContent: 'flex-end', marginTop: 12 }}>
+          <button className="btn gh" onClick={onClose}>取消</button>
+          <button className="btn p" onClick={submit} disabled={saving}>
+            {saving ? '保存中…' : '保存并写入 settings.json'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Claude Code 域（模型岛分区块）：env 托管单档卡片 + 编辑弹窗；模型值一律手动配置 */
+function ClaudeDomain() {
+  const [live, setLive] = useState<ClaudeProviderLive | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    setError(null);
+    try {
+      setLive(await claudeProvidersOverview());
+    } catch (e) {
+      setError(String(e));
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const enabledIds = useEnabledAgents();
+  const claudeOff = !isAgentEnabled(enabledIds, 'claude');
+  const row = (k: string, v: string, mono = false) => (
+    <div className="flex" style={{ gap: 8, fontSize: 11.5, padding: '3px 0' }}>
+      <span style={{ color: 'var(--color-text-3)', flex: 'none', width: 150 }}>{k}</span>
+      <span style={{ fontFamily: mono ? 'Consolas, monospace' : undefined, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {v || <span style={{ color: 'var(--color-text-3)' }}>未配置</span>}
+      </span>
+    </div>
+  );
+
+  return (
+    <div style={{ marginTop: 18 }}>
+      <div className="flex items-center" style={{ gap: 8, marginBottom: 8 }}>
+        <b style={{ fontSize: 13 }}>Claude Code · settings.json env 托管</b>
+        {live?.onboarding_done ? (
+          <span className="chip ok">已跳过首次引导</span>
+        ) : (
+          <span className="chip warn" title="保存配置时会自动写入 ~/.claude.json hasCompletedOnboarding=true">未跳过首次引导</span>
+        )}
+        <span style={{ flex: 1 }} />
+        {message && <span className="chip ok">{message}</span>}
+        <button className="btn gh" onClick={() => setEditing(true)}>编辑配置</button>
+      </div>
+
+      {claudeOff && (
+        <div className="card" style={{ padding: 14, marginBottom: 10, borderColor: 'var(--color-warn, #d9a441)', fontSize: 12 }}>
+          <b>Claude Code 插件已停用</b>
+          <span style={{ color: 'var(--color-text-2)' }}>{' '}—— 到 Plugin 岛开启后可读写 ~/.claude/settings.json。</span>
+        </div>
+      )}
+
+      {error && (
+        <div style={{ fontSize: 12, color: 'var(--color-danger)', marginBottom: 10, whiteSpace: 'pre-wrap' }}>{error}</div>
+      )}
+
+      <div className="item-grid" style={claudeOff ? { opacity: 0.45, pointerEvents: 'none' } : undefined}>
+        <div className="item-card sm">
+          <div className="card-top">
+            <div className="grow" style={{ minWidth: 0 }}>
+              <div className="nm">ANTHROPIC 环境变量</div>
+              <div className="ds">~/.claude/settings.json · 单档直写 · Key 只存目标文件</div>
+              <div style={{ marginTop: 6 }}>
+                {row('ANTHROPIC_BASE_URL', live?.base_url ?? '…', true)}
+                {row('ANTHROPIC_AUTH_TOKEN', live?.has_api_key ? '••••••••（已配置）' : '', true)}
+                {row('ANTHROPIC_MODEL', live?.model ?? '', true)}
+                {row('ANTHROPIC_SMALL_FAST_MODEL', live?.small_fast_model ?? '', true)}
+              </div>
+            </div>
+          </div>
+          <div className="card-actions">
+            <span className={`chip ${live?.configured ? 'ok' : 'off'}`}>{live?.configured ? '已配置' : '未配置'}</span>
+            <span className="chip off">模型手动配置</span>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ fontSize: 11, color: 'var(--color-text-3)', marginTop: 8 }}>
+        · 保存时同步写入 ~/.claude.json&#123;"hasCompletedOnboarding": true&#125; 跳过首次引导 · Claude Code 重启会话后生效 · 模型名以网关实际提供为准（拉取列表后单击选用或手动输入）
+      </div>
+
+      {editing && live && (
+        <ClaudeModal
+          initial={live}
+          onClose={() => setEditing(false)}
+          onSaved={(msg) => {
+            setEditing(false);
+            setMessage(msg);
+            void refresh();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
 /** M4 模型岛 —— E1 Provider 列表（ZCode 直写 + WB models.json 写穿） */
 export function ModelsPage() {
   const [data, setData] = useState<ProvidersOverview | null>(null);
@@ -531,6 +821,8 @@ export function ModelsPage() {
         · 修改「默认」后需重启 ZCode 生效 · WB 侧：openai-compatible 保存时写穿 models.json（1s 热加载即生效），anthropic 型仅 ZCode
         {hiddenCount > 0 && ` · 已隐藏 ${hiddenCount} 个 ZCode 内置档位（builtin:*），此处仅显示手动添加的 Provider`}
       </div>
+
+      <ClaudeDomain />
 
       {(creating || editing) && (
         <ProviderModal

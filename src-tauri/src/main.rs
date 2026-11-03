@@ -89,14 +89,58 @@ fn main() {
     // 无头模式：agenthub.exe --usage-collect [range]  采集双源 + 打印聚合概览
     if args.iter().any(|a| a == "--usage-collect") {
         let store = agenthub_lib::store::Store::open().expect("初始化 ~/.agenthub 失败");
-        let (z, w) = agenthub_lib::usage::collect_all(&store, None).expect("采集失败");
-        println!("新增事件 zcode={z} workbuddy={w}");
+        let (z, w, c) = agenthub_lib::usage::collect_all(&store, None).expect("采集失败");
+        println!("新增事件 zcode={z} workbuddy={w} claude={c}");
         let range = args.get(args.len() - 1).map(String::as_str).unwrap_or("day");
         let o = agenthub_lib::usage::overview(&store, range).expect("聚合失败");
         println!(
             "{}",
             serde_json::to_string_pretty(&o).expect("serialize")
         );
+        return;
+    }
+    // 无头模式：agenthub.exe --import-ccswitch <备份文件路径>  cc-switch SQL 备份用量导入
+    // 明细逐条 + 30 天前日汇总按 request_count 合成事件，request_id 加 ccs: 前缀幂等可重跑
+    if let Some(pos) = args.iter().position(|a| a == "--import-ccswitch") {
+        let path = args.get(pos + 1).expect("缺备份文件路径").clone();
+        let store = agenthub_lib::store::Store::open().expect("初始化 ~/.agenthub 失败");
+        match agenthub_lib::ccsimport::import_backup(&store, &path) {
+            Ok(report) => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).expect("serialize")
+                );
+            }
+            Err(e) => {
+                eprintln!("导入失败: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    // 无头模式：agenthub.exe --claude-setup --base-url <url> --api-key <key> [--model <m>] [--small-model <m>]
+    // Claude Code 模型托管一步到位：settings.json env 四键 + 跳过首次引导（key 只写目标文件）
+    if args.iter().any(|a| a == "--claude-setup") {
+        let get = |flag: &str| -> Option<String> {
+            args.iter()
+                .position(|a| a == flag)
+                .and_then(|i| args.get(i + 1))
+                .cloned()
+        };
+        let base_url = get("--base-url").unwrap_or_default();
+        let input = agenthub_lib::providers::ClaudeSaveInput {
+            base_url,
+            api_key: get("--api-key"),
+            model: get("--model"),
+            small_fast_model: get("--small-model"),
+        };
+        match agenthub_lib::providers::write_claude_provider(&input) {
+            Ok(msg) => println!("{msg}"),
+            Err(e) => {
+                eprintln!("claude-setup 失败: {e}");
+                std::process::exit(1);
+            }
+        }
         return;
     }
     // 无头模式：agenthub.exe --market-refresh  刷新全部内置市场目录
@@ -181,6 +225,53 @@ fn main() {
             let results = agenthub_lib::sessions::copy_sessions(&store, &[sid.clone()], tuid, &backup);
             println!("== target {tuid} ==");
             println!("{}", serde_json::to_string_pretty(&results).expect("serialize"));
+        }
+        return;
+    }
+    // 无头模式：agenthub.exe --checkin  WB 全账号签到领积分（给 uTools 插件 / 计划任务用）
+    // 注意：受 ~/.agenthub/keys/wb-checkin-auto 开关与插件启用门控约束，与 GUI 同一开关
+    if args.iter().any(|a| a == "--checkin") {
+        let store = agenthub_lib::store::Store::open().expect("初始化 ~/.agenthub 失败");
+        let results = agenthub_lib::checkin::auto_checkin_all(&store).expect("签到失败");
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&results).expect("serialize")
+        );
+        return;
+    }
+    // 无头模式：agenthub.exe --wb-switch <slot-id> [--force]  切换账号槽位（JSON SwitchReport）
+    // --force = WB 正在运行时先 taskkill 结束（调用方须已向用户二次确认）；不带则 WB 运行中直接报错
+    if let Some(pos) = args.iter().position(|a| a == "--wb-switch") {
+        let slot_id = args.get(pos + 1).expect("缺 slot-id（见 --wb-status 输出）").clone();
+        let force = args.iter().any(|a| a == "--force");
+        let store = agenthub_lib::store::Store::open().expect("初始化 ~/.agenthub 失败");
+        if force && agenthub_lib::account::process_running() {
+            if let Err(e) = agenthub_lib::account::kill_process() {
+                eprintln!("结束 WB 进程失败: {e}");
+                std::process::exit(1);
+            }
+            // 等 taskkill 落地，最多 5 秒；switch_account 内部还会再检测一次
+            for _ in 0..10 {
+                if !agenthub_lib::account::process_running() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+        }
+        match agenthub_lib::account::switch_account(&store, &slot_id, &[]) {
+            Ok(report) => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).expect("serialize")
+                );
+                if !report.ok {
+                    std::process::exit(1);
+                }
+            }
+            Err(e) => {
+                eprintln!("切号失败: {e}");
+                std::process::exit(1);
+            }
         }
         return;
     }
