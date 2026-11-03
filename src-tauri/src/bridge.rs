@@ -47,47 +47,76 @@ pub struct SaveProviderInput {
     pub base_url: String,
     pub api_key: Option<String>,
     pub models: Option<Vec<String>>,
+    /// 分发到 ZCode（勾选写入 v2/config.json；不勾 = 移除，模型岛列表不再显示）
+    #[serde(default)]
+    pub dispatch_zcode: bool,
+    /// 分发到 WorkBuddy（勾选且 openai-compatible 才写穿；不勾 = 摘除托管条目）
+    #[serde(default)]
+    pub dispatch_wb: bool,
 }
 
-/// 保存 provider：直写 ZCode v2/config.json + openai-compatible 写穿 WB models.json
-/// （key 仅在显式传入时更新）
+/// 保存 provider（分发驱动）：勾 ZCode 写 v2/config.json（不勾移除）；勾 WB 且
+/// openai-compatible 写穿 models.json（不勾摘除托管条目）。至少勾一个。
+/// Key 只在 Rust 层流转：显式传入优先，否则从 ZCode 目标文件回读（删除前回读，窗口保证）。
 #[tauri::command]
 pub fn provider_save(state: State<'_, Store>, input: SaveProviderInput) -> Result<String, String> {
     if !provider_zcode::KINDS.contains(&input.kind.as_str()) {
         return Err(format!("未知 kind：{}", input.kind));
     }
-    // 插件门控：ZCode 是主存储必须启用；WB 写穿仅在 WB 插件启用时执行
+    if !input.dispatch_zcode && !input.dispatch_wb {
+        return Err("至少勾选一个分发工具（WorkBuddy / ZCode）".into());
+    }
     agenthub_core::plugins::require_enabled(&state, "zcode")?;
     let wb_enabled = agenthub_core::plugins::active_ids(&state)?
         .iter()
         .any(|id| id == "workbuddy");
-    // WB 侧写穿要拿真 key：显式传入优先，否则从 ZCode 目标文件回读（不出 Rust 层）
-    let wb_key = if wb_enabled {
-        provider_zcode::resolve_api_key(&input.id, input.api_key.as_deref()).ok()
-    } else {
-        None
-    };
-    provider_zcode::write_zcode_provider(&provider_zcode::ProviderWrite {
-        id: input.id.clone(),
-        name: input.name,
-        kind: input.kind.clone(),
-        base_url: input.base_url.clone(),
-        api_key: input.api_key,
-        reset_models_with: input.models.clone(),
-    })?;
-    let Some(note) = provider_wb::on_provider_saved(
-        &state,
-        &input.id,
-        &input.kind,
-        &input.base_url,
-        wb_key.as_deref(),
-        input.models.as_deref(),
-    ) else {
-        return Ok("已写入 ZCode · WB 插件未启用，未写穿 models.json".into());
-    };
-    Ok(format!("已写入 ZCode · {}", note?))
-}
+    let api_key_snapshot = input.api_key.clone();
+    let mut notes: Vec<String> = Vec::new();
 
+    // 1) ZCode：勾选写入（先写后删，保住 WB 写穿的 key 回读窗口）
+    if input.dispatch_zcode {
+        provider_zcode::write_zcode_provider(&provider_zcode::ProviderWrite {
+            id: input.id.clone(),
+            name: input.name,
+            kind: input.kind.clone(),
+            base_url: input.base_url.clone(),
+            api_key: input.api_key,
+            reset_models_with: input.models.clone(),
+        })?;
+        notes.push("已写入 ZCode".into());
+    }
+
+    // 2) WB 分发（key：显式传入优先，否则从 config 回读 —— 此时 config 尚未删除）
+    if input.dispatch_wb {
+        if input.kind != "openai-compatible" {
+            notes.push("WB 侧仅支持 OpenAI 兼容接入点，未写穿".into());
+        } else if !wb_enabled {
+            notes.push("WB 插件未启用，未写穿 models.json".into());
+        } else {
+            let key = provider_zcode::resolve_api_key(&input.id, api_key_snapshot.as_deref()).ok();
+            let models = input.models.clone().unwrap_or_default();
+            let rep = provider_wb::sync_wb_provider(&input.id, &input.base_url, key.as_deref(), &models)?;
+            notes.push(format!(
+                "WB 写 {} 清 {} 跳过 {}（models.json 热加载即生效）",
+                rep.written.len(),
+                rep.removed.len(),
+                rep.skipped.len()
+            ));
+        }
+    } else if wb_enabled {
+        let n = provider_wb::remove_wb_provider(&input.id).unwrap_or(0);
+        if n > 0 {
+            notes.push(format!("已从 WB 摘除 {n} 条托管条目"));
+        }
+    }
+
+    // 3) 未勾 ZCode：移出 config（模型岛列表不再显示；WB 侧条目独立可用）
+    if !input.dispatch_zcode {
+        provider_zcode::delete_zcode_provider_if_exists(&input.id)?;
+        notes.push("未分发到 ZCode：已从 v2/config.json 移除（模型岛列表不再显示）".into());
+    }
+    Ok(notes.join(" · "))
+}
 #[tauri::command]
 pub fn provider_delete(state: State<'_, Store>, id: String) -> Result<String, String> {
     agenthub_core::plugins::require_enabled(&state, "zcode")?;

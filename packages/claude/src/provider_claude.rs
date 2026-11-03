@@ -24,6 +24,8 @@ pub struct ClaudeProviderLive {
     pub onboarding_done: bool,
     /// settings.json 是否已有 env 块（区分「未配置」与「已配置」）
     pub configured: bool,
+    /// 可选模型清单（拉取列表后由 AgentHub 写入 settings.json 顶层 modelOptions，卡片切换器数据源）
+    pub model_options: Vec<String>,
 }
 
 pub fn read_claude_provider() -> Res<ClaudeProviderLive> {
@@ -39,6 +41,15 @@ pub fn read_claude_provider() -> Res<ClaudeProviderLive> {
         .get("hasCompletedOnboarding")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let model_options = root
+        .get("modelOptions")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     Ok(ClaudeProviderLive {
         base_url: get_s("ANTHROPIC_BASE_URL"),
         has_api_key: !get_s("ANTHROPIC_AUTH_TOKEN").is_empty(),
@@ -46,6 +57,7 @@ pub fn read_claude_provider() -> Res<ClaudeProviderLive> {
         small_fast_model: get_s("ANTHROPIC_SMALL_FAST_MODEL"),
         onboarding_done,
         configured: env.is_some(),
+        model_options,
     })
 }
 
@@ -57,6 +69,8 @@ pub struct ClaudeSaveInput {
     /// None = 不变；Some("") = 清除该键
     pub model: Option<String>,
     pub small_fast_model: Option<String>,
+    /// 可选模型清单（拉取列表后保存；None = 不变）
+    pub model_options: Option<Vec<String>>,
 }
 
 fn read_json(path: &std::path::Path) -> Res<Value> {
@@ -104,6 +118,14 @@ pub fn write_claude_provider(w: &ClaudeSaveInput) -> Res<String> {
     };
     set_opt(env, "ANTHROPIC_MODEL", &w.model);
     set_opt(env, "ANTHROPIC_SMALL_FAST_MODEL", &w.small_fast_model);
+    if let Some(opts) = &w.model_options {
+        let list: Vec<String> = opts.iter().map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect();
+        if list.is_empty() {
+            obj.remove("modelOptions");
+        } else {
+            obj.insert("modelOptions".into(), json!(list));
+        }
+    }
 
     let backups = store::backups_dir();
     if path.exists() {

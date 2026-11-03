@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   claudeProviderFetchModels,
   claudeProviderSave,
@@ -78,6 +78,9 @@ function ProviderModal({
   const [showKey, setShowKey] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [presetKey, setPresetKey] = useState('custom');
+  // 分发到工具：勾谁写谁（取消勾选会从该工具移除）。ZCode 主存储默认勾；WB 按现有写穿状态初值
+  const [dispZc, setDispZc] = useState(true);
+  const [dispWb, setDispWb] = useState((initial?.wb_models?.length ?? 0) > 0);
 
   const applyPreset = (key: string) => {
     setPresetKey(key);
@@ -113,6 +116,10 @@ function ProviderModal({
       setErr('名称与接口地址必填');
       return;
     }
+    if (!dispZc && !dispWb) {
+      setErr('至少勾选一个分发工具（WorkBuddy / ZCode）');
+      return;
+    }
     setSaving(true);
     try {
       const msg = await providerSave({
@@ -122,6 +129,8 @@ function ProviderModal({
         base_url: baseUrl.trim(),
         api_key: apiKey || undefined,
         models: [...picked],
+        dispatch_zcode: dispZc,
+        dispatch_wb: dispWb,
       });
       onSaved(msg);
     } catch (e) {
@@ -187,10 +196,46 @@ function ProviderModal({
           </div>
           <div>
             <div style={label}>类型 kind</div>
-            <select style={field} value={kind} onChange={(e) => setKind(e.target.value)}>
+            <select
+              style={field}
+              value={kind}
+              onChange={(e) => {
+                setKind(e.target.value);
+                if (e.target.value === 'anthropic') setDispWb(false);
+              }}
+            >
               <option value="openai-compatible">openai-compatible</option>
               <option value="anthropic">anthropic</option>
             </select>
+          </div>
+          <div style={{ gridColumn: '1/3' }}>
+            <div style={label}>
+              分发到工具
+              <span style={{ marginLeft: 6 }}>勾谁写谁 · 保存即写入勾选的工具，取消勾选会从该工具移除</span>
+            </div>
+            <div className="flex" style={{ gap: 6 }}>
+              <span
+                className={`chip ${dispZc ? 'ok' : 'off'}`}
+                style={{ cursor: 'pointer', fontSize: 12, padding: '4px 14px' }}
+                title="写入 ZCode v2/config.json（模型岛列表与 ZCode 模型选择器可见）"
+                onClick={() => setDispZc(!dispZc)}
+              >
+                {dispZc ? '✓ ' : ''}ZCode
+              </span>
+              <span
+                className={`chip ${dispWb ? 'ok' : 'off'}`}
+                style={{
+                  cursor: kind === 'anthropic' ? 'not-allowed' : 'pointer',
+                  fontSize: 12,
+                  padding: '4px 14px',
+                  opacity: kind === 'anthropic' ? 0.45 : 1,
+                }}
+                title={kind === 'anthropic' ? 'WB 自定义模型仅支持 OpenAI 兼容接入点' : '写穿 WB models.json（1s 热加载即生效）'}
+                onClick={() => kind !== 'anthropic' && setDispWb(!dispWb)}
+              >
+                {dispWb ? '✓ ' : ''}WorkBuddy
+              </span>
+            </div>
           </div>
           <div style={{ gridColumn: '1/3' }}>
             <div style={label}>接口地址（baseURL）</div>
@@ -322,7 +367,7 @@ function ProviderModal({
         )}
         {!fetched && !!initial?.models?.length && (
           <div style={{ fontSize: 11, color: 'var(--color-text-3)', marginBottom: 10 }}>
-            以上为已保存的勾选；点「获取模型列表」拉取网关最新可用列表后重新勾选。
+            以上为已保存的勾选；点「获取模型列表」拉取网关最新可用列表后重新勾选。保存按「分发到工具」勾选写入对应工具（取消勾选 = 从该工具移除）。
           </div>
         )}
         {kind === 'anthropic' && (
@@ -365,6 +410,7 @@ function ClaudeModal({
   const [err, setErr] = useState<string | null>(null);
   const [showKey, setShowKey] = useState(false);
   const [presetKey, setPresetKey] = useState('custom');
+  const [modelOptions, setModelOptions] = useState<string[]>(initial.model_options);
   const claudePresets = PRESETS.filter((p) => p.key === 'custom' || p.kind === 'anthropic');
 
   const applyPreset = (key: string) => {
@@ -382,6 +428,7 @@ function ClaudeModal({
         api_key: apiKey || undefined,
       });
       setFetched(r);
+      if (r.models.length) setModelOptions(r.models); // 拉到的清单存盘，卡片切换器数据源
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -403,6 +450,9 @@ function ClaudeModal({
         api_key: apiKey || undefined,
         model,
         small_fast_model: smallModel,
+        model_options: modelOptions.length
+          ? [...new Set([...modelOptions, model].filter((x) => x && x.trim()))]
+          : undefined,
       });
       onSaved(msg);
     } catch (e) {
@@ -535,10 +585,13 @@ function ClaudeModal({
   );
 }
 
-/** Claude Code 域（模型岛分区块）：env 托管单档卡片 + 编辑弹窗；模型值一律手动配置 */
+/** Claude Code 域（模型岛分区块）：当前模型切换器 + 编辑弹窗。
+ *  claude 官方不支持中国区账户 —— 模型仅限用户手动配置的清单（settings.json modelOptions），
+ *  切换即写 ANTHROPIC_MODEL；首次引导自动跳过（保存时静默写入，不展示状态）。 */
 function ClaudeDomain() {
   const [live, setLive] = useState<ClaudeProviderLive | null>(null);
   const [editing, setEditing] = useState(false);
+  const [busyModel, setBusyModel] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -557,24 +610,37 @@ function ClaudeDomain() {
 
   const enabledIds = useEnabledAgents();
   const claudeOff = !isAgentEnabled(enabledIds, 'claude');
-  const row = (k: string, v: string, mono = false) => (
-    <div className="flex" style={{ gap: 8, fontSize: 11.5, padding: '3px 0' }}>
-      <span style={{ color: 'var(--color-text-3)', flex: 'none', width: 150 }}>{k}</span>
-      <span style={{ fontFamily: mono ? 'Consolas, monospace' : undefined, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-        {v || <span style={{ color: 'var(--color-text-3)' }}>未配置</span>}
-      </span>
-    </div>
-  );
+
+  /** 可选模型 = 已存清单 ∪ 当前值（去重保序） */
+  const options = useMemo(() => {
+    const set = new Set<string>();
+    if (live?.model) set.add(live.model);
+    for (const m of live?.model_options ?? []) if (m) set.add(m);
+    return [...set];
+  }, [live]);
+
+  /** 切换当前模型：只写 ANTHROPIC_MODEL（key/base_url/清单不动），Claude Code 重启会话生效 */
+  const switchModel = (m: string) => {
+    if (!live) return;
+    if (!live.base_url) {
+      setError('请先「编辑配置」填写接口地址，再切换模型');
+      return;
+    }
+    setError(null);
+    setBusyModel(true);
+    claudeProviderSave({ base_url: live.base_url, model: m })
+      .then((msg) => {
+        setMessage(msg);
+        void refresh();
+      })
+      .catch((e) => setError(String(e)))
+      .finally(() => setBusyModel(false));
+  };
 
   return (
     <div style={{ marginTop: 18 }}>
       <div className="flex items-center" style={{ gap: 8, marginBottom: 8 }}>
-        <b style={{ fontSize: 13 }}>Claude Code · settings.json env 托管</b>
-        {live?.onboarding_done ? (
-          <span className="chip ok">已跳过首次引导</span>
-        ) : (
-          <span className="chip warn" title="保存配置时会自动写入 ~/.claude.json hasCompletedOnboarding=true">未跳过首次引导</span>
-        )}
+        <b style={{ fontSize: 13 }}>Claude Code · 模型切换</b>
         <span style={{ flex: 1 }} />
         {message && <span className="chip ok">{message}</span>}
         <button className="btn gh" onClick={() => setEditing(true)}>编辑配置</button>
@@ -595,25 +661,38 @@ function ClaudeDomain() {
         <div className="item-card sm">
           <div className="card-top">
             <div className="grow" style={{ minWidth: 0 }}>
-              <div className="nm">ANTHROPIC 环境变量</div>
-              <div className="ds">~/.claude/settings.json · 单档直写 · Key 只存目标文件</div>
-              <div style={{ marginTop: 6 }}>
-                {row('ANTHROPIC_BASE_URL', live?.base_url ?? '…', true)}
-                {row('ANTHROPIC_AUTH_TOKEN', live?.has_api_key ? '••••••••（已配置）' : '', true)}
-                {row('ANTHROPIC_MODEL', live?.model ?? '', true)}
-                {row('ANTHROPIC_SMALL_FAST_MODEL', live?.small_fast_model ?? '', true)}
+              <div className="nm">当前模型（ANTHROPIC_MODEL）</div>
+              <div className="ds">~/.claude/settings.json · 切换即写入，重启 Claude Code 会话生效</div>
+              <div style={{ marginTop: 8 }}>
+                <select
+                  style={{ ...field, fontFamily: 'Consolas, monospace' }}
+                  value={live?.model ?? ''}
+                  disabled={busyModel || !live?.base_url || options.length === 0}
+                  onChange={(e) => switchModel(e.target.value)}
+                >
+                  {options.length === 0 && <option value="">未配置模型（先编辑配置拉取/输入）</option>}
+                  {!live?.model && options.length > 0 && <option value="">（未设置，走网关默认）</option>}
+                  {options.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </select>
               </div>
             </div>
           </div>
           <div className="card-actions">
-            <span className={`chip ${live?.configured ? 'ok' : 'off'}`}>{live?.configured ? '已配置' : '未配置'}</span>
-            <span className="chip off">模型手动配置</span>
+            <span className={`chip ${live?.has_api_key ? 'ok' : 'off'}`}>Key{live?.has_api_key ? '已配置' : '未配置'}</span>
+            <span className={`chip ${live?.base_url ? 'ok' : 'off'}`}>网关{live?.base_url ? '已配置' : '未配置'}</span>
+            <span className="chip off" title="claude 官方不支持中国区账户，仅可使用手动配置的模型清单">
+              模型仅限手动配置
+            </span>
           </div>
         </div>
       </div>
 
-      <div style={{ fontSize: 11, color: 'var(--color-text-3)', marginTop: 8 }}>
-        · 保存时同步写入 ~/.claude.json&#123;"hasCompletedOnboarding": true&#125; 跳过首次引导 · Claude Code 重启会话后生效 · 模型名以网关实际提供为准（拉取列表后单击选用或手动输入）
+      <div style={{ fontSize: 10.5, color: 'var(--color-text-3)', marginTop: 8 }}>
+        · 首次引导自动跳过（保存配置时静默写入 hasCompletedOnboarding）· 模型清单在「编辑配置」里拉取或手动输入 · claude 官方不支持中国区账户，模型仅限手动配置的清单
       </div>
 
       {editing && live && (
@@ -630,7 +709,6 @@ function ClaudeDomain() {
     </div>
   );
 }
-
 /** M4 模型岛 —— E1 Provider 列表（ZCode 直写 + WB models.json 写穿） */
 export function ModelsPage() {
   const [data, setData] = useState<ProvidersOverview | null>(null);

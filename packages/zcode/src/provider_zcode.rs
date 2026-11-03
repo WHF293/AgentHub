@@ -302,3 +302,31 @@ pub fn provider_set_default(
     agenthub_core::plugins::require_enabled(&state, "zcode")?;
     set_default_provider(&family, &key)
 }
+
+/// 删除 provider（不存在时静默成功）。组装桥「未分发到 ZCode」路径用：
+/// provider 本体被移出 v2/config.json 后不再出现在模型岛列表，WB 侧托管条目独立存活。
+pub fn delete_zcode_provider_if_exists(id: &str) -> Res<()> {
+    let path = zcode::v2_config();
+    let mut root = read_json(&path)?;
+    let existed = root
+        .get_mut("provider")
+        .and_then(Value::as_object_mut)
+        .map(|p| p.remove(id).is_some())
+        .unwrap_or(false);
+    if !existed {
+        return Ok(());
+    }
+    let backups = store::backups_dir();
+    if path.exists() {
+        fsutil::backup_file(&path, &backups)?;
+    }
+    let bytes = serde_json::to_vec_pretty(&root).map_err(|e| e.to_string())?;
+    fsutil::atomic_write(&path, &bytes)?;
+    if let Ok(conn_store) = Store::open() {
+        let _ = conn_store.with(|conn| {
+            store::log_op(conn, "provider.delete_zcode", id, json!({}));
+            Ok(())
+        });
+    }
+    Ok(())
+}

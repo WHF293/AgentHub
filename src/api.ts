@@ -264,6 +264,10 @@ export const providerSave = (input: {
   base_url: string;
   api_key?: string;
   models?: string[];
+  /** 分发到 ZCode（不勾 = 从 v2/config.json 移除，列表不再显示） */
+  dispatch_zcode: boolean;
+  /** 分发到 WorkBuddy（openai-compatible 才写穿；不勾 = 摘除托管条目） */
+  dispatch_wb: boolean;
 }) => invoke<string>('provider_save', { input });
 
 export const providerDelete = (id: string) => invoke<string>('provider_delete', { id });
@@ -282,6 +286,8 @@ export interface ClaudeProviderLive {
   onboarding_done: boolean;
   /** settings.json 是否已有 env 块 */
   configured: boolean;
+  /** 可选模型清单（拉取列表后存 settings.json modelOptions，卡片切换器数据源） */
+  model_options: string[];
 }
 
 export const claudeProvidersOverview = () =>
@@ -298,6 +304,7 @@ export const claudeProviderSave = (input: {
   api_key?: string;
   model?: string;
   small_fast_model?: string;
+  model_options?: string[];
 }) => invoke<string>('claude_provider_save', { input });
 
 // ─── M5 WB 账号 ───

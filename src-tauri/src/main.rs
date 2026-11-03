@@ -165,6 +165,7 @@ fn main() {
             api_key: get("--api-key"),
             model: get("--model"),
             small_fast_model: get("--small-model"),
+            model_options: None,
         };
         match agenthub_plugin_claude::provider_claude::write_claude_provider(&input) {
             Ok(msg) => println!("{msg}"),
