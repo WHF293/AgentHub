@@ -1,0 +1,21 @@
+{
+  "pluginName": "AgentHub 助手",
+  "description": "WorkBuddy 签到领积分 + 账号槽位切换，由 AgentHub CLI 驱动",
+  "version": "0.1.0",
+  "author": "wanghaofeng",
+  "preload": "preload.js",
+  "logo": "logo.png",
+  "platform": ["win32"],
+  "features": [
+    {
+      "code": "wb-switch",
+      "explain": "切换 WorkBuddy 账号槽位",
+      "cmds": ["切号", "切换账号", "wb账号", "ah"]
+    },
+    {
+      "code": "wb-checkin",
+      "explain": "WorkBuddy 全账号签到领积分",
+      "cmds": ["签到", "领积分", "checkin"]
+    }
+  ]
+}
