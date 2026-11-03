@@ -36,7 +36,6 @@ echarts.use([
 ]);
 
 type Granularity = 'day' | 'week' | 'month' | 'year' | 'all';
-type ViewMode = 'calendar' | 'chart';
 type AgentFilter = 'all' | 'workbuddy' | 'zcode' | 'claude';
 /** 范围筛选：agent 维度 + 账号维度（account='all' 表示该 Agent 全部账号） */
 interface Scope {
@@ -236,17 +235,19 @@ let dataCache: {
 } | null = null;
 
 /**
- * Usage 岛 —— 盈亏日历式三级下钻（年历 → 月历 → 日历）+ 日历/曲线切换 +
- * hover 显示 agent-model 消耗明细 + Agent 三开关。当日消耗用 24h 曲线呈现。
+ * Usage 岛 —— 粒度 × 双栏布局：左 = 周期卡片（日历/周卡/月卡/年卡，点击切换统计周期），
+ * 右 = 该周期的调用曲线（日=24h / 周=按天 / 月=按天 / 年=按月）。
+ * hover 显示 agent-model 消耗明细 + Agent 范围筛选 + Agent 三开关。
  */
 export function UsagePage() {
   const [granularity, setGranularity] = useState<Granularity>('day');
-  const [viewMode, setViewMode] = useState<ViewMode>('calendar');
-  const [dayYm, setDayYm] = useState(todayYm()); // 日历视图当前月
-  const [monY, setMonY] = useState(new Date().getFullYear()); // 月历视图当前年
-  const [selectedDate, setSelectedDate] = useState(todayStr()); // 点日格选中的日期
-  const [weekStart, setWeekStart] = useState<string>(mondayOf(todayStr())); // 周视图当前周（周一）
-  const [weekCalYm, setWeekCalYm] = useState<string>(todayYm()); // 周历锚点月（一页中最新的月份，向前显示其与前两月）
+  const [dayYm, setDayYm] = useState(todayYm()); // 日视图当前月
+  const [monY, setMonY] = useState(new Date().getFullYear()); // 月视图当前年
+  const [selMon, setSelMon] = useState(new Date().getMonth() + 1); // 月视图选中的月（1-12）
+  const [selectedDate, setSelectedDate] = useState(todayStr()); // 日视图选中的日期
+  const [weekStart, setWeekStart] = useState<string>(mondayOf(todayStr())); // 周视图选中的周（周一）
+  const [weekYm, setWeekYm] = useState<string>(todayYm()); // 周视图当前月（周卡列表所在月）
+  const [yearSel, setYearSel] = useState(new Date().getFullYear()); // 年视图选中的年
   const [scope, setScope] = useState<Scope>(SCOPE_ALL);
   const [accounts, setAccounts] = useState<UsageAccount[]>([]);
   const [slotLabels, setSlotLabels] = useState<Record<string, string>>({});
@@ -317,15 +318,17 @@ export function UsagePage() {
     return () => clearInterval(t);
   }, [refresh]);
 
-  // 当前上下文的 overview range
+  // 当前上下文的 overview range（KPI 合计口径）
   const overviewRange =
     granularity === 'day'
       ? `date:${selectedDate}`
       : granularity === 'week'
         ? `week:${weekStart}`
         : granularity === 'month'
-          ? `month:${dayYm}`
-          : 'all';
+          ? `month:${monY}-${String(selMon).padStart(2, '0')}`
+          : granularity === 'year'
+            ? `year:${yearSel}`
+            : 'all';
   useEffect(() => {
     void usageOverview(overviewRange)
       .then(setOverview)
@@ -378,6 +381,50 @@ export function UsagePage() {
     setSelectedDate(best ?? `${dayYm}-01`);
   }, [dayYm, filtered, selectedDate]);
 
+  // 周视图：翻月后把选中周钳进显示月（选该月 token 峰值周，空月回落首个周一）
+  useEffect(() => {
+    const mons = mondaysOfMonth(weekYm);
+    if (mons.length === 0 || mons.includes(weekStart)) return;
+    let best: string | null = null;
+    let bestTok = -1;
+    for (const mon of mons) {
+      const tok = Array.from({ length: 7 }, (_, i) => filtered.byDay.get(shiftDate(mon, i))?.tokens ?? 0).reduce(
+        (s, v) => s + v,
+        0,
+      );
+      if (tok > bestTok) {
+        bestTok = tok;
+        best = mon;
+      }
+    }
+    setWeekStart(best ?? mons[0]);
+  }, [weekYm, filtered, weekStart]);
+
+  // 月视图：翻年后若同月号在该年无数据，自动切到该年峰值月
+  useEffect(() => {
+    const sel = `${monY}-${String(selMon).padStart(2, '0')}`;
+    if (filtered.byMonth.has(sel)) return;
+    let best: string | null = null;
+    let bestTok = -1;
+    for (let m = 1; m <= 12; m += 1) {
+      const ym = `${monY}-${String(m).padStart(2, '0')}`;
+      const tok = filtered.byMonth.get(ym)?.tokens ?? 0;
+      if (tok > bestTok) {
+        bestTok = tok;
+        best = ym;
+      }
+    }
+    if (best) setSelMon(Number(best.slice(5)));
+  }, [monY, filtered, selMon]);
+
+  // 年视图：选中年无数据时回落到最近有数据的年
+  useEffect(() => {
+    if (granularity !== 'year') return;
+    const yrs = [...filtered.byYear.keys()].sort();
+    if (yrs.length === 0 || yrs.includes(String(yearSel))) return;
+    setYearSel(Number(yrs[yrs.length - 1]));
+  }, [granularity, filtered, yearSel]);
+
   const totals = useMemo(() => {
     const list = (overview?.totals ?? []).filter((t) => matchScope(t.agent, t.account, scope));
     const sum = (f: (t: (typeof list)[number]) => number) => list.reduce((a, t) => a + f(t), 0);
@@ -428,7 +475,7 @@ export function UsagePage() {
 
   const dayCard = (date: string): Bucket | undefined => filtered.byDay.get(date);
 
-  // ── 曲线模式（echarts）：x = 时间（按天/按月/按年），堆叠柱 + hover 明细 ──
+  // ── 右栏曲线（echarts）：周=按天 / 月=按天 / 年=按月；日视图用 24h DayCurve，不经这里 ──
   const chartRef = useEChart(() => {
     const c = themeColors();
     const agents = scope.agent === 'all' ? agentIds : [scope.agent];
@@ -437,94 +484,53 @@ export function UsagePage() {
     let cats: string[] = [];
     let seriesData: Record<string, number[]> = {};
     let title = '';
-    if (granularity === 'day') {
-      cats = dayCells.filter((x) => x.day).map((x) => x.date!);
-      title = `按天用量 · ${dayYm}`;
-      for (const a of agents) {
-        seriesData[a] = cats.map((d) => {
-          const b = filtered.byDay.get(d);
-          if (!b) return 0;
-          return b.details
-            .filter((x) => x.agent === a && (scope.account === 'all' || x.account === scope.account))
-            .reduce((s, x) => s + x.tokens, 0);
-        });
-      }
-    } else if (granularity === 'week') {
+    let bucket: 'day' | 'month' = 'day';
+    if (granularity === 'week') {
       cats = Array.from({ length: 7 }, (_, i) => shiftDate(weekStart, i));
       title = `按天用量 · ${weekStart.slice(5)} ~ ${shiftDate(weekStart, 6).slice(5)}`;
-      for (const a of agents) {
-        seriesData[a] = cats.map((d) => {
-          const b = filtered.byDay.get(d);
-          if (!b) return 0;
-          return b.details
-            .filter((x) => x.agent === a && (scope.account === 'all' || x.account === scope.account))
-            .reduce((s, x) => s + x.tokens, 0);
-        });
-      }
-    } else if (granularity === 'month' || granularity === 'all') {
-      // 月：'month' 为当年 12 个月；'all' 为全历史出现的每一个月
-      cats =
-        granularity === 'month'
-          ? Array.from({ length: 12 }, (_, i) => `${monY}-${String(i + 1).padStart(2, '0')}`)
-          : [...filtered.byMonth.keys()].sort();
-      title = granularity === 'month' ? `按月用量 · ${monY}` : '按月用量 · 全部历史';
-      for (const a of agents) {
-        seriesData[a] = cats.map((ym) => {
-          const b = filtered.byMonth.get(ym);
-          if (!b) return 0;
-          return b.details
-            .filter((x) => x.agent === a && (scope.account === 'all' || x.account === scope.account))
-            .reduce((s, x) => s + x.tokens, 0);
-        });
-      }
-    } else if (granularity === 'year') {
-      cats = [...filtered.byYear.keys()].sort();
-      title = '按年用量';
-      for (const a of agents) {
-        seriesData[a] = cats.map((y) => {
-          const b = filtered.byYear.get(y);
-          if (!b) return 0;
-          return b.details
-            .filter((x) => x.agent === a && (scope.account === 'all' || x.account === scope.account))
-            .reduce((s, x) => s + x.tokens, 0);
-        });
-      }
+    } else if (granularity === 'month') {
+      const ym = `${monY}-${String(selMon).padStart(2, '0')}`;
+      const [y, m] = ym.split('-').map(Number);
+      const days = new Date(y, m, 0).getDate();
+      cats = Array.from({ length: days }, (_, i) => `${ym}-${String(i + 1).padStart(2, '0')}`);
+      title = `按天用量 · ${ym}`;
+    } else {
+      // year：选中年 12 个月
+      bucket = 'month';
+      cats = Array.from({ length: 12 }, (_, i) => `${yearSel}-${String(i + 1).padStart(2, '0')}`);
+      title = `按月用量 · ${yearSel}`;
+    }
+    const buckets = bucket === 'day' ? filtered.byDay : filtered.byMonth;
+    for (const a of agents) {
+      seriesData[a] = cats.map((k) => {
+        const b = buckets.get(k);
+        if (!b) return 0;
+        return b.details
+          .filter((x) => x.agent === a && (scope.account === 'all' || x.account === scope.account))
+          .reduce((s, x) => s + x.tokens, 0);
+      });
     }
     return {
       backgroundColor: 'transparent',
       title: { text: title, left: 12, top: 8, textStyle: { color: c.text2, fontSize: 12, fontWeight: 700 } },
       tooltip: {
         trigger: 'axis',
-        formatter: (ps: { axisValue: string; seriesName: string; value: number }[]) => {
-          const key =
-            granularity === 'day'
-              ? ps[0]?.axisValue
-              : granularity === 'month'
-                ? ps[0]?.axisValue
-                : ps[0]?.axisValue;
-          const b =
-            granularity === 'day'
-              ? filtered.byDay.get(key)
-              : granularity === 'year'
-                ? filtered.byYear.get(key)
-                : filtered.byMonth.get(key);
-          const lines = (ps ?? []).map(
-            (p) => `${p.seriesName}: ${fmtTok(p.value)} tok`,
-          );
+        formatter: (ps: { dataIndex: number; seriesName: string; value: number }[]) => {
+          const key = cats[ps[0]?.dataIndex ?? 0] ?? '';
+          const b = buckets.get(key);
+          const lines = (ps ?? []).map((p) => `${p.seriesName}: ${fmtTok(p.value)} tok`);
           const detail = detailText(b, scope)
             .split('\n')
             .map((l) => `<div style="opacity:.75">${l}</div>`)
             .join('');
-          return `${ps[0]?.axisValue ?? ''}<br/>${lines.join('<br/>')}<br/>${detail}`;
+          return `${key}<br/>${lines.join('<br/>')}<br/>${detail}`;
         },
       },
       legend: { top: 8, right: 12, textStyle: { color: c.text2 } },
       grid: { left: 56, right: 20, top: 44, bottom: 28 },
       xAxis: {
         type: 'category',
-        data: cats.map((x) =>
-          granularity === 'day' ? x.slice(5) : granularity === 'all' ? x.slice(2) : x,
-        ),
+        data: cats.map((x) => (granularity === 'year' ? `${x.slice(5)}月` : x.slice(5))),
         axisLabel: { color: c.text3 },
         axisLine: { lineStyle: { color: c.border } },
       },
@@ -535,14 +541,16 @@ export function UsagePage() {
       },
       series: agents.map((a) => ({
         name: seriesName(a),
-        type: 'bar' as const,
-        stack: 'total',
+        type: 'line' as const,
+        smooth: true,
+        showSymbol: false,
         data: seriesData[a] ?? [],
-        itemStyle: { color: agentColor(a), borderRadius: [3, 3, 0, 0] },
-        barMaxWidth: 32,
+        itemStyle: { color: agentColor(a) },
+        lineStyle: { width: 1.6 },
+        areaStyle: { opacity: 0.08 },
       })),
     } satisfies echarts.EChartsCoreOption;
-  }, [granularity, filtered, dayYm, monY, scope, accountLabel, agentIds]);
+  }, [granularity, filtered, monY, selMon, weekStart, yearSel, scope, accountLabel, agentIds]);
 
   const granularityChip = (g: Granularity, label: string) => (
     <span
@@ -585,7 +593,7 @@ export function UsagePage() {
           <div className="flex items-center" style={{ gap: 10 }}>
             <span className="spinning" style={{ color: 'var(--color-primary)' }}>↻</span>
             <div style={{ fontSize: 12, color: 'var(--color-text-2)', flex: 'none' }}>
-              正在提取本地用量数据（{progress.stage === 'zcode' ? 'ZCode 账本' : 'WorkBuddy 日志'} ·{' '}
+              正在提取本地用量数据（{progress.stage === 'zcode' ? 'ZCode 账本' : progress.stage === 'claude' ? 'Claude Code 日志' : 'WorkBuddy 日志'} ·{' '}
               {progress.done}/{progress.total}）
             </div>
             <div style={{ flex: 1 }}>
@@ -605,7 +613,7 @@ export function UsagePage() {
         {granularityChip('month', '月')}
         {granularityChip('year', '年')}
         {granularityChip('all', '全部')}
-        {granularity !== 'year' && granularity !== 'all' && (
+        {granularity !== 'all' && (
           <>
             <button className="btn gh" style={{ fontSize: 11, padding: '3px 10px' }} onClick={() => navShift(-1)}>
               ‹
@@ -626,20 +634,6 @@ export function UsagePage() {
         <button className="btn gh" onClick={() => void refresh()} disabled={refreshing}>
           <span className={refreshing ? 'spinning' : ''} style={{ display: 'inline-block' }}>↻</span> 刷新
         </button>
-        <span
-          className={`chip ${viewMode === 'calendar' ? 'ok' : 'off'}`}
-          style={{ cursor: 'pointer' }}
-          onClick={() => setViewMode('calendar')}
-        >
-          日历
-        </span>
-        <span
-          className={`chip ${viewMode === 'chart' ? 'ok' : 'off'}`}
-          style={{ cursor: 'pointer' }}
-          onClick={() => setViewMode('chart')}
-        >
-          曲线
-        </span>
       </div>
       <div className="mb-3 flex items-center" style={{ gap: 8, flexWrap: 'wrap' }}>
         <b style={{ fontSize: 12, color: 'var(--color-text-2)' }}>范围</b>
@@ -705,9 +699,13 @@ export function UsagePage() {
           <div className="k">
             {granularity === 'day'
               ? selectedDate
-              : granularity === 'month'
-                ? dayYm
-                : '全部'}
+              : granularity === 'week'
+                ? `${weekStart.slice(5)} ~ ${shiftDate(weekStart, 6).slice(5)}`
+                : granularity === 'month'
+                  ? `${monY}-${String(selMon).padStart(2, '0')}`
+                  : granularity === 'year'
+                    ? String(yearSel)
+                    : '全部'}
             {totals.credit > 0 && <> · 官方积分 {Math.round(totals.credit).toLocaleString()}</>}
           </div>
         </div>
@@ -728,33 +726,34 @@ export function UsagePage() {
         </div>
       </div>
 
-      {/* 主区：日历 或 曲线。day 粒度下日历与当日 24h 曲线左右并排且等高
-          （各 min 500px，一行放不下两个时自动换行；单卡片时占满整行） */}
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, marginBottom: 12 }}>
-      {viewMode === 'calendar' ? (
+      {/* 主区：左 = 周期卡片（日历/周卡/月卡/年卡，点击切换统计周期），右 = 该周期调用曲线；「全部」无周期区 */}
+      {granularity !== 'all' && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, marginBottom: 12, alignItems: 'stretch' }}>
         <div className="card" style={{ padding: 14, flex: '1 1 500px', minWidth: 500 }}>
-          {/* 年历：年份格 */}
+          {/* 年卡：全部年份（点击切换年，右侧为该年按月曲线） */}
           {granularity === 'year' && (
             <>
               <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--color-text-2)', marginBottom: 8 }}>
-                年历 · 点击年份下钻到月历
+                年卡 · 点击切换年（右侧为该年按月曲线；当前：{yearSel}）
               </div>
-              <div className="grid grid-cols-4 gap-2.5">
+              <div className="grid grid-cols-2 gap-2.5">
                 {years.length === 0 && (
                   <div style={{ fontSize: 12, color: 'var(--color-text-3)' }}>暂无数据</div>
                 )}
                 {years.map((y) => {
                   const b = filtered.byYear.get(y);
+                  const isCur = Number(y) === yearSel;
                   return (
                     <div
                       key={y}
                       className="card hover-zoom"
-                      style={{ padding: 12, cursor: 'pointer' }}
-                      title={detailText(b, scope)}
-                      onClick={() => {
-                        setMonY(Number(y));
-                        setGranularity('month');
+                      style={{
+                        padding: 12,
+                        cursor: 'pointer',
+                        border: isCur ? '1.5px solid var(--color-primary-strong)' : '1px solid var(--color-border)',
                       }}
+                      title={detailText(b, scope)}
+                      onClick={() => setYearSel(Number(y))}
                     >
                       <div className="flex items-center justify-between">
                         <b style={{ fontSize: 14 }}>{y}</b>
@@ -773,168 +772,78 @@ export function UsagePage() {
             </>
           )}
 
-          {/* 全部：逐年月历网格（历史全量） */}
-          {granularity === 'all' && (
-            <>
-              <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--color-text-2)', marginBottom: 8 }}>
-                全部历史 · 逐年月历 · 点击月份下钻到日历
-              </div>
-              {[...years].reverse().map((y) => {
-                const maxOfYearAll = Math.max(
-                  1,
-                  ...Array.from({ length: 12 }, (_, i) =>
-                    filtered.byMonth.get(`${y}-${String(i + 1).padStart(2, '0')}`)?.tokens ?? 0,
-                  ),
-                );
-                return (
-                  <div key={y} style={{ marginBottom: 14 }}>
-                    <div style={{ fontSize: 12, fontWeight: 700, margin: '2px 0 6px', color: 'var(--color-text-2)' }}>
-                      {y} 年
-                    </div>
-                    <div className="grid grid-cols-4 gap-2.5">
-                      {Array.from({ length: 12 }, (_, i) => {
-                        const ym = `${y}-${String(i + 1).padStart(2, '0')}`;
-                        const b = filtered.byMonth.get(ym);
-                        return (
-                          <div
-                            key={ym}
-                            className="card hover-zoom"
-                            style={{
-                              padding: 12,
-                              cursor: b ? 'pointer' : 'default',
-                              opacity: b ? 1 : 0.45,
-                              borderColor: b ? heatColor(b.tokens, maxOfYearAll) : undefined,
-                            }}
-                            title={detailText(b, scope)}
-                            onClick={
-                              b
-                                ? () => {
-                                    setDayYm(ym);
-                                    setMonY(Number(y));
-                                    setGranularity('day');
-                                  }
-                                : undefined
-                            }
-                          >
-                            <div className="flex items-center justify-between">
-                              <b style={{ fontSize: 13 }}>{ym}</b>
-                              <span className="chip off">{b?.calls ?? 0} 次</span>
-                            </div>
-                            <div style={{ fontSize: 14, fontWeight: 800, fontFamily: 'Consolas, monospace', marginTop: 4 }}>
-                              {b ? fmtTok(b.tokens) : '—'}
-                            </div>
-                            <div className="bar" style={{ marginTop: 6 }}>
-                              <i style={{ width: `${((b?.tokens ?? 0) / maxOfYearAll) * 100}%` }} />
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                );
-              })}
-            </>
-          )}
-
-          {/* 周历：三个月一页（锚点月 + 前两月），‹ › 每次翻 3 个月；点日期跳到所在周并查看当日 24h 曲线 */}
+          {/* 周卡：显示月各周（点击切换选中周，右侧为该周按天曲线） */}
           {granularity === 'week' && (
             <>
               <div className="flex items-center" style={{ marginBottom: 8 }}>
                 <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--color-text-2)', flex: 1 }}>
-                  周历 · {weekCalYm.slice(0, 4)}年 · 点击日期查看当日 24h 曲线
+                  周卡 · {weekYm} · 点击切换周
                 </span>
-                <button className="btn gh" style={{ fontSize: 11, padding: '3px 10px' }} onClick={() => setWeekCalYm(shiftMonth(weekCalYm, -3))}>
+                <button className="btn gh" style={{ fontSize: 11, padding: '3px 10px' }} onClick={() => setWeekYm(shiftMonth(weekYm, -1))}>
                   ‹
                 </button>
                 <span className="chip off" style={{ fontFamily: 'Consolas, monospace', fontSize: 11, padding: '3px 10px' }}>
-                  {[0, -1, -2].map((k) => shiftMonth(weekCalYm, k)).map((ym) => ym.slice(5)).join(' / ')}
+                  {weekYm}
                 </span>
-                <button className="btn gh" style={{ fontSize: 11, padding: '3px 10px' }} onClick={() => setWeekCalYm(shiftMonth(weekCalYm, 3))}>
+                <button className="btn gh" style={{ fontSize: 11, padding: '3px 10px' }} onClick={() => setWeekYm(shiftMonth(weekYm, 1))}>
                   ›
                 </button>
               </div>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
-                {[0, -1, -2].map((k) => shiftMonth(weekCalYm, k)).map((ym) => {
-                  const [cy, cm] = ym.split('-').map(Number);
-                  return (
-                    <div key={ym} className="card" style={{ padding: 10 }}>
-                      <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--color-text-1)', marginBottom: 8 }}>
-                        {cy}年{cm}月
+              <div className="grid grid-cols-2 gap-2.5">
+                {(() => {
+                  const mons = mondaysOfMonth(weekYm);
+                  const tokOf = (mon: string) =>
+                    Array.from({ length: 7 }, (_, i) => filtered.byDay.get(shiftDate(mon, i))?.tokens ?? 0).reduce(
+                      (s, v) => s + v,
+                      0,
+                    );
+                  const callsOf = (mon: string) =>
+                    Array.from({ length: 7 }, (_, i) => filtered.byDay.get(shiftDate(mon, i))?.calls ?? 0).reduce(
+                      (s, v) => s + v,
+                      0,
+                    );
+                  const maxWeek = Math.max(1, ...mons.map(tokOf));
+                  return mons.map((mon) => {
+                    const tok = tokOf(mon);
+                    const isCur = mon === weekStart;
+                    return (
+                      <div
+                        key={mon}
+                        className="card hover-zoom"
+                        style={{
+                          padding: 12,
+                          cursor: 'pointer',
+                          border: isCur ? '1.5px solid var(--color-primary-strong)' : '1px solid var(--color-border)',
+                        }}
+                        title={`${mon.slice(5)} ~ ${shiftDate(mon, 6).slice(5)}`}
+                        onClick={() => setWeekStart(mon)}
+                      >
+                        <div className="flex items-center justify-between">
+                          <b style={{ fontSize: 13 }}>
+                            {mon.slice(5)} ~ {shiftDate(mon, 6).slice(5)}
+                          </b>
+                          <span className="chip off">{callsOf(mon)} 次</span>
+                        </div>
+                        <div style={{ fontSize: 14, fontWeight: 800, fontFamily: 'Consolas, monospace', marginTop: 4 }}>
+                          {tok ? fmtTok(tok) : '—'}
+                        </div>
+                        <div className="bar" style={{ marginTop: 6 }}>
+                          <i style={{ width: `${(tok / maxWeek) * 100}%` }} />
+                        </div>
                       </div>
-                      {mondaysOfMonth(ym).map((mon) => {
-                        const days = Array.from({ length: 7 }, (_, i) => shiftDate(mon, i));
-                        const weekTok = days.reduce((s, d) => s + (filtered.byDay.get(d)?.tokens ?? 0), 0);
-                        const isCur = mon === weekStart;
-                        return (
-                          <div key={mon} style={{ marginBottom: 8 }}>
-                            <div className="flex items-center" style={{ gap: 6, marginBottom: 3 }}>
-                              <span
-                                style={{
-                                  fontSize: 10, fontFamily: 'Consolas, monospace', flex: 1,
-                                  color: isCur ? 'var(--color-primary-strong)' : 'var(--color-text-3)',
-                                  fontWeight: isCur ? 700 : 400,
-                                }}
-                              >
-                                {mon.slice(5)} ~ {shiftDate(mon, 6).slice(5)}
-                              </span>
-                              <span style={{ fontSize: 10, fontFamily: 'Consolas, monospace', color: 'var(--color-text-2)' }}>
-                                {weekTok > 0 ? fmtTok(weekTok) : '—'}
-                              </span>
-                            </div>
-                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 3 }}>
-                              {days.map((date) => {
-                                const b = filtered.byDay.get(date);
-                                const inMonth = date.slice(0, 7) === ym;
-                                return (
-                                  <div
-                                    key={date}
-                                    className="hover-zoom"
-                                    title={detailText(b, scope)}
-                                    onClick={() => {
-                                      setWeekStart(mon);
-                                      setSelectedDate(date);
-                                    }}
-                                    style={{
-                                      height: 30,
-                                      borderRadius: 6,
-                                      cursor: 'pointer',
-                                      display: 'flex',
-                                      alignItems: 'center',
-                                      justifyContent: 'center',
-                                      fontSize: 10.5,
-                                      fontWeight: 700,
-                                      background: heatColor(b?.tokens ?? 0, maxOfDay),
-                                      border:
-                                        date === selectedDate
-                                          ? '1.5px solid var(--color-primary-strong)'
-                                          : isCur
-                                            ? '1px solid color-mix(in srgb, var(--color-primary) 55%, transparent)'
-                                            : '1px solid var(--color-border)',
-                                      opacity: inMonth ? 1 : 0.4,
-                                      color: b && b.tokens / maxOfDay > 0.35 ? '#fff' : inMonth ? 'var(--color-text-2)' : 'var(--color-text-3)',
-                                    }}
-                                  >
-                                    {Number(date.slice(8))}
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  );
-                })}
+                    );
+                  });
+                })()}
               </div>
             </>
           )}
 
-          {/* 月历：12 个月格 */}
+          {/* 月卡：{monY} 年 12 个月（点击切换月，右侧为该月按天曲线） */}
           {granularity === 'month' && (
             <>
               <div className="flex items-center" style={{ marginBottom: 8 }}>
                 <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--color-text-2)', flex: 1 }}>
-                  月历 · {monY} · 点击月份下钻到日历
+                  月卡 · {monY} · 点击切换月（当前：{monY}-{String(selMon).padStart(2, '0')}）
                 </span>
                 <button className="btn gh" style={{ fontSize: 11, padding: '3px 10px' }} onClick={() => setMonY((y) => y - 1)}>
                   ‹
@@ -946,10 +855,11 @@ export function UsagePage() {
                   ›
                 </button>
               </div>
-              <div className="grid grid-cols-4 gap-2.5">
+              <div className="grid grid-cols-3 gap-2.5">
                 {Array.from({ length: 12 }, (_, i) => {
                   const ym = `${monY}-${String(i + 1).padStart(2, '0')}`;
                   const b = filtered.byMonth.get(ym);
+                  const isCur = selMon === i + 1;
                   return (
                     <div
                       key={ym}
@@ -957,13 +867,11 @@ export function UsagePage() {
                       style={{
                         padding: 12,
                         cursor: 'pointer',
-                        borderColor: b ? heatColor(b.tokens, maxOfMonth) : undefined,
+                        border: isCur ? '1.5px solid var(--color-primary-strong)' : '1px solid var(--color-border)',
+                        borderColor: !isCur && b ? heatColor(b.tokens, maxOfMonth) : undefined,
                       }}
                       title={detailText(b, scope)}
-                      onClick={() => {
-                        setDayYm(ym);
-                        setGranularity('day');
-                      }}
+                      onClick={() => setSelMon(i + 1)}
                     >
                       <div className="flex items-center justify-between">
                         <b style={{ fontSize: 13 }}>{i + 1} 月</b>
@@ -982,7 +890,7 @@ export function UsagePage() {
             </>
           )}
 
-          {/* 日历：当月逐日格 */}
+          {/* 日历：当月逐日格（点击选日，右侧为当日 24h 曲线） */}
           {granularity === 'day' && (
             <>
               <div className="flex items-center" style={{ marginBottom: 8 }}>
@@ -1024,10 +932,7 @@ export function UsagePage() {
                         border: isSel ? '1.5px solid var(--color-primary-strong)' : '1px solid var(--color-border)',
                         color: b && b.tokens / maxOfDay > 0.35 ? '#fff' : 'var(--color-text-2)',
                       }}
-                      onClick={() => {
-                        setSelectedDate(date);
-                        setViewMode('calendar');
-                      }}
+                      onClick={() => setSelectedDate(date)}
                     >
                       <div style={{ fontSize: 11, fontWeight: 700 }}>{cell.day}</div>
                       <div style={{ fontSize: 10.5, fontFamily: 'Consolas, monospace', marginTop: 2 }}>
@@ -1040,19 +945,23 @@ export function UsagePage() {
             </>
           )}
         </div>
-      ) : (
-        <div className="card" style={{ padding: 8, flex: '1 1 500px', minWidth: 500 }}>
-          <div ref={chartRef} style={{ width: '100%', height: 320 }} />
-        </div>
-      )}
-
-      {/* 当日 24h 曲线（点日格后展示） */}
-      {granularity === 'day' && selectedDate && overview?.curve && overview.curve.length > 0 && (
         <div className="card" style={{ padding: 8, flex: '1 1 500px', minWidth: 500, display: 'flex', flexDirection: 'column' }}>
-          <DayCurve overview={overview} date={selectedDate} scope={scope} accountLabel={accountLabel} />
+          {granularity === 'day' ? (
+            selectedDate && overview?.curve && overview.curve.length > 0 ? (
+              <DayCurve overview={overview} date={selectedDate} scope={scope} accountLabel={accountLabel} />
+            ) : (
+              <div
+                style={{ flex: 1, minHeight: 320, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--color-text-3)', fontSize: 12 }}
+              >
+                当日无调用量，暂无 24h 曲线
+              </div>
+            )
+          ) : (
+            <div ref={chartRef} style={{ width: '100%', height: 400 }} />
+          )}
+        </div>
         </div>
       )}
-      </div>
 
       {/* 按模型细分：柱状 + 饼图 双图并排 */}
       <div className="grid grid-cols-2 gap-3">
@@ -1071,8 +980,8 @@ export function UsagePage() {
       </div>
 
       <div style={{ fontSize: 10.5, color: 'var(--color-text-3)', marginTop: 10 }}>
-        · 日历格与曲线点悬浮显示 agent-model 消耗明细 · 点击年格→月历→日历逐级下钻 ·
-        点日格切当日 24h 曲线 · 数据永久留存 ~/.agenthub
+        · 卡片与曲线点悬浮显示 agent-model 消耗明细 · 左卡切换统计周期，右图即该周期曲线 ·
+        日视图点日格切当日 24h 曲线 · 数据永久留存 ~/.agenthub
       </div>
     </div>
   );
