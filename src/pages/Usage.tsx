@@ -567,17 +567,16 @@ export function UsagePage() {
     granularity === 'day'
       ? dayYm
       : granularity === 'week'
-        ? `${weekStart.slice(5)} ~ ${shiftDate(weekStart, 6).slice(5)}`
+        ? weekYm
         : granularity === 'month'
           ? String(monY)
-          : granularity === 'year'
-            ? '全部年份'
-            : '全部历史';
+          : String(yearSel);
 
   const navShift = (delta: number) => {
     if (granularity === 'day') setDayYm(shiftMonth(dayYm, delta));
-    else if (granularity === 'week') setWeekStart(shiftDate(weekStart, delta * 7));
+    else if (granularity === 'week') setWeekYm(shiftMonth(weekYm, delta));
     else if (granularity === 'month') setMonY((y) => y + delta);
+    else if (granularity === 'year') setYearSel((y) => y + delta);
   };
 
   return (
