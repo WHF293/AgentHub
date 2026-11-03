@@ -76,7 +76,7 @@ pub fn migrate_skills(store: &Store, pref: Option<&str>) -> Res<MigrateReport> {
     let central = store::central_skills_dir();
     let mut warnings: Vec<String> = Vec::new();
 
-    let skills_adapters = plugins::enabled_adapters(store)?
+    let skills_adapters = plugins::active_adapters(store)?
         .into_iter()
         .filter(|a| a.caps().skills)
         .collect::<Vec<_>>();

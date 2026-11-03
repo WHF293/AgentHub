@@ -475,7 +475,7 @@ pub struct WbCheckinInput {
 pub async fn wb_checkin_claim(input: WbCheckinInput) -> Result<WbCheckinResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let store = Store::open().map_err(|e| format!("打开本地库失败: {e}"))?;
-        if !agenthub_core::plugins::enabled_ids(&store)
+        if !agenthub_core::plugins::active_ids(&store)
             .map(|ids| ids.iter().any(|a| a == "workbuddy"))
             .unwrap_or(false)
         {
@@ -545,7 +545,7 @@ pub fn auto_checkin_all(store: &Store) -> Res<Vec<WbCheckinResult>> {
     if !auto_checkin_enabled() {
         return Ok(Vec::new());
     }
-    if agenthub_core::plugins::enabled_ids(store)
+    if agenthub_core::plugins::active_ids(store)
         .map(|ids| !ids.iter().any(|a| a == "workbuddy"))
         .unwrap_or(true)
     {

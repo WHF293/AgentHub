@@ -159,6 +159,20 @@ impl Store {
                  );",
             )
             .map_err(|e| format!("plugin_state 建表失败: {e}"))?;
+            // v2.1：插件安装态（monorepo 插件化：默认全部安装、可卸载/重装；数据保留不删）
+            let has_installed: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('plugin_state') WHERE name = 'installed'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            if has_installed == 0 {
+                conn.execute_batch(
+                    "ALTER TABLE plugin_state ADD COLUMN installed INTEGER NOT NULL DEFAULT 1",
+                )
+                .map_err(|e| format!("plugin_state.installed 列迁移失败: {e}"))?;
+            }
             conn.execute_batch(
                 "CREATE TABLE IF NOT EXISTS wb_model_entries (
                    entry_id TEXT PRIMARY KEY,

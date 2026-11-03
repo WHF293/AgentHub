@@ -145,6 +145,8 @@ pub fn run() {
             agenthub_core::commands::set_close_to_tray,
             agenthub_core::plugins::plugin_list,
             agenthub_core::plugins::plugin_toggle,
+            agenthub_core::plugins::plugin_install,
+            agenthub_core::plugins::plugin_uninstall,
             agenthub_core::mcp::mcp_overview,
             agenthub_core::mcp::mcp_adopt,
             agenthub_core::mcp::mcp_save,

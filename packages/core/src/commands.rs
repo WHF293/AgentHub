@@ -124,7 +124,7 @@ pub fn skills_overview(store_state: State<'_, Store>) -> Result<Vec<SkillOvervie
     store::ensure_hub_dirs()?;
     let central = store::central_skills_dir();
     let central_list = adapters::scan_skills_dir(&central);
-    let skills_adapters = plugins::enabled_adapters(&store_state)?
+    let skills_adapters = plugins::active_adapters(&store_state)?
         .into_iter()
         .filter(|a| a.caps().skills)
         .collect::<Vec<_>>();
@@ -199,7 +199,7 @@ pub fn relink_skill(
     let Some(a) = adapters::by_id(&agent) else {
         return Err(format!("未知 agent：{agent}"));
     };
-    if !plugins::enabled_ids(&store_state)?.iter().any(|id| id == &agent) {
+    if !plugins::active_ids(&store_state)?.iter().any(|id| id == &agent) {
         return Err(format!("{} 插件未启用（Plugin 岛开启后可分发）", a.display_name()));
     }
     if !a.caps().skills {
@@ -306,7 +306,7 @@ pub fn skill_delete(store_state: State<'_, Store>, name: String) -> Result<(), S
     let backups = store::backups_dir();
 
     // 各启用插件端的引用（WholeDir 整链端：skills 目录即中央仓库本体，随源一并消失，跳过单条引用）
-    for a in plugins::enabled_adapters(&store_state)?
+    for a in plugins::active_adapters(&store_state)?
         .into_iter()
         .filter(|a| a.caps().skills)
     {

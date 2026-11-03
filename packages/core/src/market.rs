@@ -188,7 +188,7 @@ pub fn install(store: &Store, name: &str) -> Res<()> {
     // 各启用插件端按策略分发（PerSkill 逐项链 / WholeDir 整链天然生效）
     let mode = migrate::parse_link_mode(None);
     let skills_adapters: Vec<&'static dyn crate::adapters::AgentAdapter> =
-        crate::plugins::enabled_adapters(store)?
+        crate::plugins::active_adapters(store)?
             .into_iter()
             .filter(|a| a.caps().skills)
             .collect();

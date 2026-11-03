@@ -84,7 +84,7 @@ fn points_to(path: &Path, canonical: &Path) -> bool {
 /// 全局记忆文件列表：hub 真身恒显；各端残留文件仅在该端插件启用时列出
 /// （目标清单由各插件经 AgentAdapter::memory_targets 提供，core 不感知具体路径）
 pub fn global_files(store: &Store) -> Vec<MemoryFile> {
-    let enabled = crate::plugins::enabled_ids(store).unwrap_or_default();
+    let enabled = crate::plugins::active_ids(store).unwrap_or_default();
     let on = |agent: &str| enabled.iter().any(|id| id == agent);
     let mut out = Vec::new();
     let canonical = store::central_memory_md();
@@ -184,7 +184,7 @@ pub fn write_global(store: &Store, input: &WriteMemoryInput) -> Res<()> {
     let raw = Path::new(&input.path);
     let root = allowed_root_of(raw, store).ok_or_else(|| format!("路径不在允许范围：{}", input.path))?;
     // 归属判定：目标落在哪个插件的数据根就要求哪个插件启用（hub 真身恒可写）
-    let enabled = crate::plugins::enabled_ids(store)?;
+    let enabled = crate::plugins::active_ids(store)?;
     let mut owner: Option<&'static dyn crate::adapters::AgentAdapter> = None;
     for a in crate::adapters::registry() {
         if a.data_dirs().iter().any(|d| raw.starts_with(d)) {
@@ -239,7 +239,7 @@ pub fn unify_global_memory(store: &Store) -> Res<Vec<String>> {
     }
     let canonical = store::central_memory_md();
     // 插件门控：只对已启用端的记忆目标做种子合并与建链（目标清单来自 memory_targets 钩子）
-    let enabled = crate::plugins::enabled_ids(store)?;
+    let enabled = crate::plugins::active_ids(store)?;
     let targets_all: Vec<(&'static dyn crate::adapters::AgentAdapter, Vec<MemoryTarget>)> =
         crate::adapters::registry()
             .iter()

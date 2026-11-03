@@ -203,7 +203,7 @@ pub struct McpDrift {
 
 /// 已启用且具备 MCP 能力的适配器（注册表顺序）
 fn enabled_mcp_adapters(store: &Store) -> Res<Vec<&'static dyn adapters::AgentAdapter>> {
-    Ok(plugins::enabled_adapters(store)?
+    Ok(plugins::active_adapters(store)?
         .into_iter()
         .filter(|a| a.caps().mcp)
         .collect())

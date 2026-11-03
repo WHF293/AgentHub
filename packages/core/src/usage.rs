@@ -105,7 +105,7 @@ pub fn collect_all(store: &Store, app: Option<&AppHandle>) -> Res<(usize, usize,
 fn do_collect_all(store: &Store, app: Option<&AppHandle>) -> Res<(usize, usize, usize)> {
     // 插件门控：停用的 agent 适配器不采集（历史事件保留在库，重新启用后恢复增量）；
     // 旧来源清理随各插件采集器自清，引擎不感知具体 agent
-    let enabled = crate::plugins::enabled_ids(store)?;
+    let enabled = crate::plugins::active_ids(store)?;
     let mut counts: std::collections::HashMap<&'static str, usize> =
         std::collections::HashMap::new();
     for a in crate::adapters::registry() {

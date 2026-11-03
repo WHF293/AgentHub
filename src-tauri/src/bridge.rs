@@ -21,7 +21,7 @@ pub struct ProvidersOverview {
 #[tauri::command]
 pub fn providers_overview(state: State<'_, Store>) -> Result<ProvidersOverview, String> {
     // ZCode 插件停用：Model 岛主存储在 ZCode v2/config.json，停用即空态（前端提示去 Plugin 岛开启）
-    if !agenthub_core::plugins::enabled_ids(&state)?.iter().any(|id| id == "zcode") {
+    if !agenthub_core::plugins::active_ids(&state)?.iter().any(|id| id == "zcode") {
         return Ok(ProvidersOverview {
             providers: Vec::new(),
             selected_keys: Default::default(),
@@ -58,7 +58,7 @@ pub fn provider_save(state: State<'_, Store>, input: SaveProviderInput) -> Resul
     }
     // 插件门控：ZCode 是主存储必须启用；WB 写穿仅在 WB 插件启用时执行
     agenthub_core::plugins::require_enabled(&state, "zcode")?;
-    let wb_enabled = agenthub_core::plugins::enabled_ids(&state)?
+    let wb_enabled = agenthub_core::plugins::active_ids(&state)?
         .iter()
         .any(|id| id == "workbuddy");
     // WB 侧写穿要拿真 key：显式传入优先，否则从 ZCode 目标文件回读（不出 Rust 层）
@@ -93,7 +93,7 @@ pub fn provider_delete(state: State<'_, Store>, id: String) -> Result<String, St
     agenthub_core::plugins::require_enabled(&state, "zcode")?;
     provider_zcode::delete_zcode_provider(&id)?;
     // WB 侧清理仅在 WB 插件启用时执行
-    let wb_enabled = agenthub_core::plugins::enabled_ids(&state)?
+    let wb_enabled = agenthub_core::plugins::active_ids(&state)?
         .iter()
         .any(|x| x == "workbuddy");
     let n = if wb_enabled {

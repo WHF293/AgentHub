@@ -6,6 +6,37 @@ fn main() {
     // 不启 GUI，直接执行 M1 迁移并打印 JSON 报告（用于验收 / 冒烟）
     let args: Vec<String> = std::env::args().collect();
     agenthub_lib::init_plugins();
+    // 无头模式：agenthub.exe --plugin-list / --plugin-set <id> <install|uninstall|enable|disable>
+    // 插件生命周期管理（给 uTools 插件 / 脚本用）
+    if args.iter().any(|a| a == "--plugin-list") {
+        let store = agenthub_lib::store::Store::open().expect("初始化 ~/.agenthub 失败");
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&agenthub_lib::plugins::list(&store).expect("list 失败"))
+                .expect("serialize")
+        );
+        return;
+    }
+    if let Some(pos) = args.iter().position(|a| a == "--plugin-set") {
+        let id = args.get(pos + 1).expect("缺插件 id（workbuddy/zcode/claude）").clone();
+        let action = args.get(pos + 2).cloned().unwrap_or_default();
+        let store = agenthub_lib::store::Store::open().expect("初始化 ~/.agenthub 失败");
+        let r = match action.as_str() {
+            "install" => agenthub_lib::plugins::set_installed(&store, &id, true),
+            "uninstall" => agenthub_lib::plugins::set_installed(&store, &id, false),
+            "enable" => agenthub_lib::plugins::set_enabled(&store, &id, true),
+            "disable" => agenthub_lib::plugins::set_enabled(&store, &id, false),
+            other => Err(format!("未知动作：{other}（install/uninstall/enable/disable）")),
+        };
+        match r {
+            Ok(_) => println!("✓ {id} {action}"),
+            Err(e) => {
+                eprintln!("失败: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if args.iter().any(|a| a == "--migrate") {
         let mode = args
             .iter()

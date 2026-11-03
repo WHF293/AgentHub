@@ -266,7 +266,7 @@ pub fn on_provider_saved(
     api_key: Option<&str>,
     models: Option<&[String]>,
 ) -> Option<Res<String>> {
-    let wb_enabled = agenthub_core::plugins::enabled_ids(store)
+    let wb_enabled = agenthub_core::plugins::active_ids(store)
         .map(|ids| ids.iter().any(|i| i == "workbuddy"))
         .unwrap_or(false);
     if !wb_enabled {
