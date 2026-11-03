@@ -4,13 +4,16 @@
 
 ## 项目概述
 
-**AgentHub**（v0.4.0）— AI Agent 统一管理工具（Tauri 2 Windows 桌面应用）：可插拔适配器架构
-（内置 WorkBuddy / ZCode，社区可按 AgentAdapter 接口扩展 claude / codex / trae 等），提供
+**AgentHub**（v0.7.4）— AI Agent 统一管理工具（Tauri 2 Windows 桌面应用）：**monorepo 插件化
+架构**（Cargo workspace：packages/core 共享内核 + packages/{workbuddy,zcode,claude} 插件包 +
+src-tauri 壳；社区可按 AgentAdapter 接口新增 packages/<id> 插件包），提供
 Skills / MCP / 第三方模型 / 多账号 / Memory / 用量分析一站式管理台，替代已卸载的 cc-switch。
 中央仓库一份配置、分发到各已启用插件端。
 
 - 技术栈：**Tauri v2 + React 19 + TypeScript + Zustand + UnoCSS + ECharts 6（按需导入）+
-  SQLite（rusqlite bundled）+ reqwest 0.12（blocking + rustls-tls）+ pnpm**
+  SQLite（rusqlite bundled）+ reqwest 0.12（blocking + rustls-tls）+ pnpm；
+  Rust 侧 Cargo workspace（根 Cargo.toml + packages/* + src-tauri，.cargo/config.toml 钉
+  target-dir=src-tauri/target 保持 CI/产物路径不变）**
 - 中央存储：`~/.agenthub/`（agenthub.db 单一事实源 + skills/ 中央仓库 + backups/ 时间戳备份
   + market-cache/ + updates/ 在线更新下载区）
 - UI：Islands 布局 + 侧栏 8 岛（**Usage / Account / Skill / MCP / Model / Memory / Plugin /
@@ -52,7 +55,9 @@ agenthub.exe --fetch-models <provider-id>                    # /v1/models 候选
 agenthub.exe --wb-status / --wb-save-slot <label>            # 账号岛探测/存槽位
 agenthub.exe --wb-sessions                                   # 列当前账号会话（sessions.rs）
 agenthub.exe --wb-copy-test <session-id> <target-uid>...    # 会话复制演练，支持多目标（配 USERPROFILE 重定向沙盒）
-agenthub.exe --usage-collect [range]                         # 用量双源采集 + 聚合
+agenthub.exe --usage-collect [range]                         # 用量采集（插件钩子分发）+ 聚合
+agenthub.exe --plugin-list / --plugin-set <id> <install|uninstall|enable|disable>
+                                                             # 插件生命周期（列表 / 安装卸载启停）
 agenthub.exe --claude-setup --base-url <url> --api-key <key> [--model <m>] [--small-model <m>]
                                                              # Claude Code 模型托管一步到位（settings.json env + 跳过引导）
 agenthub.exe --import-ccswitch <备份文件路径>                 # cc-switch SQL 备份用量导入（明细+30天前日汇总，ccs: 前缀幂等）
@@ -64,63 +69,45 @@ agenthub.exe --unify-memory                                  # 全局记忆统�
 ## 目录结构
 
 ```
-src/                    前端
-  api.ts                invoke 封装（TS 类型与 Rust serde 一一对应，字段保持 snake_case）
-  common/               useDesktopChrome / TitleBar（自绘外壳 + 版本徽标 + 更新入口）/
-                        ConfirmDialog（含 InputDialog）/ AgentCard / PageHeader / LogoMark
-  pages/                8 个功能岛（Dashboard = Usage 岛：已启用插件健康卡 + 用量分析；
-                        Plugins = 可插拔适配器管理岛）
-  agents.ts             前端 agent 注册表（id → 名称 / 身份色，与 Rust adapters::registry() 对应）
-  stores/               nav / theme（light|dark|system）/ ui（toast）
-  styles/theme.css      主题 token（侧栏/列表/卡片=中性灰，按钮与底色=清新绿，用户定版；
-                        WB=绿 / ZCode=天青蓝 双 Agent 身份色全局统一）
-src-tauri/src/
-  store.rs              SQLite 单一事实源 + schema v1（11 表）+ v1.1~v1.9 增量迁移
-                        （headers_json / wb_slots TEXT 主键 / wb_session_seen / credit /
-                        wb_model_entries / usage_events.account 账号归属 / zcode_slots /
-                        mcp_servers.enabled_json 按 agent 启用态 / plugin_state 插件开关）
-  adapters/             可插拔核心层：mod.rs = AgentAdapter trait（能力声明 caps + skills 域
-                        链接策略/建链 + MCP 域配置形态/条目翻译）+ 静态注册表 registry()/by_id()；
-                        wb.rs / zcode.rs / claude.rs 各实现 trait（WB 逐项链 / ZCode 整目录链 +
-                        Claude Code 整目录链 + mcp.json disabled / config.json enabled /
-                        claude.json mcpServers 在场即启用 翻译）。社区新增 agent：实现 trait →
-                        REGISTRY 加一行 → 前端 agents.ts 补一条，引擎零改动
-  plugins.rs            插件启用状态（plugin_state 表）：首次运行按安装探测自动启用（source=auto），
-                        之后以用户手动开关为准持久化（source=manual）；enabled_adapters() 是
-                        skills 迁移 / MCP 同步 / usage 采集的统一门控入口
-  fsutil.rs             软链三级策略（symlink→junction→copy）/ 原子写 / 备份 / fnv1a
-  migrate.rs            M1：各启用插件端 skills 并集导入中央仓库 → 按各端策略建链
-                        （逐项链 / 整目录链由 AgentAdapter 声明，报告按 agent 分组）
-  mcp.rs                统一 MCP 引擎（agent 无关）：按注册表遍历启用插件端做格式翻译
-                        （合并式写入：托管字段覆盖，timeout/headers 等保留）；
-                        mcp_servers.enabled_json 按 agent 记启用态（NULL 回退旧列）
-  providers.rs          ZCode v2/config.json 直写 + WB models.json 写穿（v1.5 托管清单）；
-                        Key 只存目标文件不入库
-  modelfetch.rs         /v1/models 候选链（models_url 覆写 → /v{N} 原样 → 剥离后缀兜底 →
-                        GLM 系网关内置推荐兜底；anthropic 原生 x-api-key 优先）
-  market.rs             Skill 市场（anthropics/skills + obra/superpowers + cexll/myclaude，通用树扫描）
-  account.rs            WB 槽位：tasklist 检测 →（UI 确认后关进程）→ 备份 → 恢复 → 校验 → 启动 → 回滚
-  zaccount.rs           ZCode 槽位：~/.zcode/v2/credentials.json 文件级复制（token enc:v1: 加密
-                        不读取）→ 备份 → 原子写入 → JSON 校验 → 失败回滚；CLI 每次启动重读凭据，
-                        无需进程管理
-  quota.rs              ZCode Coding Plan 官方额度（GET open.bigmodel.cn/api/monitor/usage/quota/limit，
-                        Key 读 ZCode v2 config 的 builtin:bigmodel-coding-plan options.apiKey 明文，
-                        unit=3→5h / unit=6→周）+ WB 积分汇总（剩余 = ~/.agenthub/keys/wb-credit-total
-                        − 本月已用 credit，与账单同源）
-  memory.rs             全局记忆统一（真身 ~/.agenthub/MEMORY.md，双端路径建文件符号链接，幂等）
-                        + .ai/ 桥接（init/sync/consolidate，FNV 块指纹漂移检测）
-  usage.rs              用量双源采集 + 聚合（见下「关键约定」第 5/6 条）；WB 事件经
-                        sessions.user_id 打账号标（wb_session_accounts + 存量回填），
-                        聚合/矩阵/账号清单输出均带 account 维度（Usage 岛范围筛选数据源）
-  update.rs             在线更新（NSIS 安装版，链路对齐 whf-stock-board 实证实现；仓库已公开全匿名）：
-                        检测 302 重定向主通道 → 公开 API 兜底；reqwest 直连下载安装包到
-                        ~/.agenthub/updates/（真实进度）；安装 = cmd 链 `ping -n 4 & "{setup}" /S
-                        /D={原目录} & start "{exe}"` 静默装回重启（raw_arg 传参、/D= 最后且不加引号、
-                        延迟 500ms 退出）
-  commands.rs           Skills 岛命令 + app_status + op_log + set_close_to_tray
-  lib.rs                插件注册（单实例最先）/ 托盘 / 启动即后台采集用量 / IPC 命令注册
-  main.rs               无头模式入口（--migrate 等七种）
+packages/core/          agenthub-core 共享内核
+  src/adapters/mod.rs   AgentAdapter trait（caps / skills 域 / MCP 域 / collect_usage 采集钩子 /
+                        Memory 域 5 钩子 / skills 联动 2 钩子 / auth_found）+ OnceLock 注册表
+                        （registry_init 一次性收编，组装层启动首行调用）
+  src/store.rs          SQLite 单一事实源 + 增量迁移（v1.x ~ v2.1：plugin_state.installed 安装态）
+  src/plugins.rs        插件生命周期管理器：installed（默认全装，卸载联动停用，数据保留可重装）+
+                        enabled 启停 + active_ids/active_adapters 门控（installed && enabled）+
+                        require_enabled（文案区分已卸载/已停用）
+  src/{mcp,migrate}.rs  引擎（注册表驱动，零 agent 知识；MCP 合并式写入 / M1 并集导入建链）
+  src/usage.rs          用量引擎：互斥/进度事件/游标读写/聚合概览矩阵；采集经
+                        AgentAdapter::collect_usage 钩子分发各插件包，引擎不感知具体 agent
+  src/{modelfetch,market,update,memory,commands,fsutil}.rs
+                        通用域：模型候选链 / Skill 市场 / 在线更新 / Memory（注册表驱动全局
+                        记忆 + .ai/ 桥接）/ IPC 命令 / 软链三级策略 + 原子写 + 备份 + fnv1a
+packages/workbuddy/     agenthub-plugin-workbuddy：adapter.rs（逐项链 + mcp.json disabled）+
+                        account/sessions/checkin + quota_wb（积分）+ usage_wb（projects jsonl
+                        请求级采集 + 快照兜底 + 账号回填）+ provider_wb（models.json 写穿）
+packages/zcode/         agenthub-plugin-zcode：adapter.rs（整目录链 + cli config enabled）+
+                        zaccount + quota_zcode（Coding Plan 官方额度）+ usage_zcode（db.sqlite
+                        model_usage 全量账本）+ provider_zcode（v2 直写 + fetch/default 命令）+
+                        skills（插件自带技能展示）
+packages/claude/        agenthub-plugin-claude：adapter.rs（整目录链 + claude.json mcpServers
+                        在场即启用）+ usage_claude（projects jsonl 采集）+ provider_claude
+                        （settings.json env 模型托管）+ ccsimport（cc-switch 备份导入）
+src-tauri/              agenthub 壳：tauri 窗口/托盘/单实例/自启 + PLUGINS 注册（init_plugins
+                        首行必调）+ generate_handler 跨 crate 命令装配 + bridge.rs（providers 域
+                        ZCode×WB 跨插件编排桥；Key 只在 Rust 层流转）
+  src/main.rs           无头模式入口（--migrate 等；首行 init_plugins）
 .github/workflows/release.yml   tag v* 或手动触发 → Windows amd64 NSIS 安装包 → GitHub Release
+（.cargo/config.toml 钉 target-dir=src-tauri/target：CI 产物路径与本地脚本零改动）
+
+### 插件接入指南（新增 agent = 一样的写法）
+
+1. 新建 packages/<id>/ crate：实现 AgentAdapter（caps 按需裁剪 + collect_usage 采集 +
+   Memory/Skills 可选钩子）+ 专属功能域与 #[tauri::command]；pub static 暴露适配器单例。
+2. src-tauri：PLUGINS 数组加一项（registry_init 收编）+ generate_handler! 加命令路径 +
+   Cargo.toml 依赖一行。
+3. 前端 src/agents.ts 补身份（名称/默认色）+ theme.css 加 --color-agent-<id> 双主题变量。
+   参考样板：packages/claude（最新、最小完整示例）。
 ```
 
 ## 关键约定（改代码必读）
@@ -153,10 +140,7 @@ src-tauri/src/
    所有替换先备份实目录。注意 WB 是「活端」会自发重写 skills 目录打掉软链（云同步/CDN 下载），
    ZCode 是「静端」—— WB 侧 diverged 巡检是已知待办
 8. **Skill 市场安装语义**：一律先进中央仓库再分发；「未添加 ≠ 禁用」——单端独有 server 不铺到另一端
-8.5. **可插拔插件语义（2026-11-01 定版）**：每个适配器 = 一个插件（Plugin 岛管理）。首次运行
-   （plugin_state 空表）按安装探测自动启用；之后一切以用户手动开关为准（持久化，后续启动只读配置
-   不自动变更）。停用插件的端不参与导入/分发/同步/采集，Usage 历史数据保留。IPC 与 DB 中的
-   agent 一律用稳定 id 字符串（"workbuddy"/"zcode"/社区自定义），前端经 src/agents.ts 渲染身份色
+8.5. **可插拔插件语义（2026-11-03 monorepo 定版）**：每个插件 = 一个独立包（packages/<id>，内置随应用分发）。**默认全部安装**（plugin_state.installed=1）；**卸载** = installed=0 联动停用，全岛隐藏 + 门控全关，数据保留可重装；重装恢复启用。共享引擎门控统一走 active_ids/active_adapters（installed && enabled）。首次运行新适配器自动补行（installed=1，enabled 按本机安装探测）。IPC 与 DB 中的 agent 一律用稳定 id 字符串（"workbuddy"/"zcode"/"claude"/社区自定义），前端经 src/agents.ts 渲染身份色。
 9. **在线更新链路（NSIS 安装版，仓库已公开全匿名）**：update_check 检测双通道（302 重定向主通道，
    免匿名 API 限流 → 公开 API 兜底，资产 `AgentHub_v*_x64-setup.exe`）→ update_install reqwest
    直连下载安装包到 `~/.agenthub/updates/`（真实进度事件 `update-download-progress`）→ NSIS

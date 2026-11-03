@@ -126,10 +126,12 @@ export interface PluginInfo {
   agent: string;
   display_name: string;
   desc: string;
-  /** 用户配置的启用/停用 */
+  /** 用户配置的启用/停用（卸载联动停用） */
   enabled: boolean;
-  /** 本机安装探测（仅提示） */
+  /** 安装态（默认全装；卸载 = 0 全岛隐藏 + 门控全关，数据保留可重装） */
   installed: boolean;
+  /** 本机安装探测（仅提示，与安装态无关） */
+  installed_probe: boolean;
   caps: AgentCaps;
   /** 状态来源：auto = 首次运行按安装探测；manual = 用户手动设置 */
   source: string;
@@ -140,6 +142,12 @@ export const pluginList = () =>
 
 export const pluginToggle = (agent: string, enabled: boolean) =>
   invoke<void>('plugin_toggle', { agent, enabled });
+
+export const pluginInstall = (agent: string) =>
+  invoke<void>('plugin_install', { agent });
+
+export const pluginUninstall = (agent: string) =>
+  invoke<void>('plugin_uninstall', { agent });
 
 // ─── M3 MCP ───
 
