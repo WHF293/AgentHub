@@ -273,7 +273,7 @@ pub struct FetchModelsInput {
 }
 
 #[tauri::command]
-pub fn provider_fetch_models(
+pub async fn provider_fetch_models(
     state: tauri::State<'_, Store>,
     input: FetchModelsInput,
 ) -> Result<agenthub_core::modelfetch::FetchResult, String> {
@@ -294,7 +294,7 @@ pub fn provider_fetch_models(
 }
 
 #[tauri::command]
-pub fn provider_set_default(
+pub async fn provider_set_default(
     state: tauri::State<'_, Store>,
     family: String,
     key: String,

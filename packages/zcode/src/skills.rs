@@ -50,7 +50,7 @@ fn fm_get(fm: &str, key: &str) -> Option<String> {
 
 /// ZCode 插件自带技能（只读展示）
 #[tauri::command]
-pub fn zcode_plugin_skills() -> Result<Vec<PluginSkillItem>, String> {
+pub async fn zcode_plugin_skills() -> Result<Vec<PluginSkillItem>, String> {
     let mut out: Vec<PluginSkillItem> = Vec::new();
     let Some(bytes) = fsutil::read_opt(&zcode::installed_plugins_json()) else {
         return Ok(out);

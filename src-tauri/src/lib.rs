@@ -49,18 +49,40 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
-        .setup(|app| {
+        // 原生文件选择对话框（Usage 岛「导入 cc-switch 备份」入口）
+        .plugin(tauri_plugin_dialog::init())
+        // 首帧显示优化：窗口 visible:false 启动（消除 WebView2 冷启动 1~2s 白屏），
+        // 页面 load 完成后显示 —— 用户看到的第一帧就是渲染完成的界面（FCP/LCP 感知）
+        .on_page_load(|webview, payload| {
+            if payload.event() == tauri::webview::PageLoadEvent::Finished {
+                let _ = webview.show();
+            }
+        })
+        .setup(|app| {            // panic 兜底日志：把 Rust panic 落盘，便于区分「卡死」与「崩溃」
+            let _ = std::fs::create_dir_all(store::hub_dir().join("logs"));
+            std::panic::set_hook(Box::new(|info| {
+                let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+                let line = format!("[{ts}] PANIC: {info}\n");
+                let _ = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(store::hub_dir().join("logs").join("panic.log"))
+                    .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+            }));
+
             // 中央存储：~/.agenthub/agenthub.db（打开即迁移 schema）
             let store = store::Store::open().expect("初始化 ~/.agenthub 失败");
             app.manage(store);
 
-            // 启动即后台全量+增量采集用量（不依赖页面打开；历史永久留存 ~/.agenthub/agenthub.db，
-            // 卸载 zcode / workbuddy 后仍可查看）。独立 WAL 连接，不与 UI 抢锁。
+            // 后台常驻采集线程：启动即全量+增量，之后每 60s 一次增量巡检
+            // （增量续扫修复后毫秒级，不依赖页面打开；独立 WAL 连接，不与 UI 抢锁。
+            //  数据常新后，前端 Usage 页只需查库，不再主动触发采集）
             let handle = app.handle().clone();
-            std::thread::spawn(move || {
+            std::thread::spawn(move || loop {
                 if let Ok(s2) = store::Store::open() {
                     let _ = usage::collect_all(&s2, Some(&handle));
                 }
+                std::thread::sleep(std::time::Duration::from_secs(60));
             });
 
             // 启动自动签到：遍历全部 WB 账号逐个领取每日积分（接口幂等；
@@ -134,6 +156,7 @@ pub fn run() {
             bridge::providers_overview,
             bridge::provider_save,
             bridge::provider_delete,
+            bridge::claude_provider_apply,
             // core：状态 / Skills / 插件 / MCP / 用量 / 市场 / Memory / 设置 / 更新
             agenthub_core::commands::app_status,
             agenthub_core::commands::run_skills_migration,
@@ -204,6 +227,7 @@ pub fn run() {
             agenthub_plugin_claude::provider_claude::claude_providers_overview,
             agenthub_plugin_claude::provider_claude::claude_provider_fetch_models,
             agenthub_plugin_claude::provider_claude::claude_provider_save,
+            agenthub_plugin_claude::ccsimport::usage_import_ccswitch,
         ])
         .on_window_event(|window, event| {
             // 关闭行为：默认关到托盘（设置岛可切换为直接退出）

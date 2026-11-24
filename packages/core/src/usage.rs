@@ -5,7 +5,7 @@
 //! claude → projects jsonl）。隐私红线：正文永不入库。
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use chrono::{Local, TimeZone};
 use serde::Serialize;
@@ -17,6 +17,10 @@ use crate::store::Store;
 /// 采集互斥：避免启动线程与前端刷新并发重复扫描
 static COLLECTING: AtomicBool = AtomicBool::new(false);
 
+/// 进度事件节流：距上次发射的毫秒数与百分比（减少事件洪水导致的 webview 重渲染风暴）
+static LAST_EMIT_MS: AtomicI64 = AtomicI64::new(0);
+static LAST_EMIT_PCT: AtomicI64 = AtomicI64::new(-1);
+
 #[derive(Debug, Serialize, Clone)]
 pub struct CollectProgress {
     pub stage: String,
@@ -26,6 +30,20 @@ pub struct CollectProgress {
 
 pub fn emit_progress(app: Option<&AppHandle>, stage: &str, done: usize, total: usize) {
     if let Some(app) = app {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let pct = if total > 0 { (done as i64 * 100) / total as i64 } else { 100 };
+        let last_ms = LAST_EMIT_MS.load(Ordering::Relaxed);
+        let last_pct = LAST_EMIT_PCT.load(Ordering::Relaxed);
+        let is_final = total == 0 || done >= total;
+        // 节流：进度百分比变化 ≥1% 且距上次 ≥300ms 才发；完成时强制发（保持事件量 < 数十条/次采集）
+        if !is_final && (pct == last_pct || now.saturating_sub(last_ms) < 300) {
+            return;
+        }
+        LAST_EMIT_MS.store(now, Ordering::Relaxed);
+        LAST_EMIT_PCT.store(pct, Ordering::Relaxed);
         let _ = app.emit(
             "usage-collect-progress",
             CollectProgress {
@@ -99,6 +117,25 @@ pub fn collect_all(store: &Store, app: Option<&AppHandle>) -> Res<(usize, usize,
     }
     let result = do_collect_all(store, app);
     COLLECTING.store(false, Ordering::Relaxed);
+    // 重建日粒度预聚合：有新增事件才重建（无新增 = matrix 读缓存零成本）；
+    // 升级首启兜底：预聚合为空但账本非空（旧版库无 usage_daily）→ 强制重建一次
+    let mut rebuild = matches!(&result, Ok((z, w, c)) if *z > 0 || *w > 0 || *c > 0);
+    if !rebuild {
+        let (daily_n, events_n) = store.with(|conn| {
+            Ok((
+                conn.query_row("SELECT COUNT(*) FROM usage_daily", [], |r| r.get::<_, i64>(0))
+                    .unwrap_or(0),
+                conn.query_row("SELECT COUNT(*) FROM usage_events", [], |r| r.get::<_, i64>(0))
+                    .unwrap_or(0),
+            ))
+        })?;
+        rebuild = events_n > 0 && daily_n == 0;
+    }
+    if rebuild {
+        if let Err(e) = refresh_daily_agg(store) {
+            eprintln!("usage_daily 重建失败: {e}");
+        }
+    }
     result
 }
 
@@ -124,6 +161,22 @@ fn do_collect_all(store: &Store, app: Option<&AppHandle>) -> Res<(usize, usize, 
 }
 
 // ─── 聚合查询 ───
+
+/// 重建日粒度预聚合表 usage_daily（采集有新增时调用；59k 行全量重算 < 100ms）
+pub fn refresh_daily_agg(store: &Store) -> Res<()> {
+    store.with(|conn| {
+        conn.execute_batch(
+            "DELETE FROM usage_daily;
+             INSERT INTO usage_daily(date, agent, account, model, tokens, calls)
+             SELECT date(ts), agent, account, model,
+                    SUM(input_tokens + output_tokens + cache_read_tokens), COUNT(*)
+             FROM usage_events
+             GROUP BY date(ts), agent, account, model;",
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    })
+}
 
 #[derive(Debug, Serialize)]
 pub struct AgentTotal {
@@ -443,8 +496,15 @@ pub fn overview(store: &Store, range: &str) -> Res<UsageOverview> {
 use tauri::State;
 
 #[tauri::command]
-pub async fn usage_collect(state: State<'_, Store>) -> Result<(usize, usize, usize), String> {
-    collect_all(&state, None)
+pub async fn usage_collect(app: tauri::AppHandle) -> Result<(usize, usize, usize), String> {
+    // 阻塞采集放独立阻塞线程池（不占 async worker，采集期间 UI 命令照常响应）；
+    // 独立 WAL 连接，避免与 UI 共享连接抢锁
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = crate::store::Store::open().map_err(|e| e.to_string())?;
+        collect_all(&store, Some(&app))
+    })
+    .await
+    .map_err(|e| format!("采集线程失败: {e}"))?
 }
 
 #[tauri::command]
@@ -466,12 +526,12 @@ pub struct MatrixCell {
 
 #[tauri::command]
 pub async fn usage_matrix(state: State<'_, Store>) -> Result<Vec<MatrixCell>, String> {
+    // 读日粒度预聚合（collect 有新增时已重建），避免全表 GROUP BY
     state.with(|conn| {
         let mut stmt = conn
             .prepare(
-                "SELECT date(ts), agent, account, model,
-                        SUM(input_tokens + output_tokens + cache_read_tokens), COUNT(*)
-                 FROM usage_events GROUP BY date(ts), agent, account, model ORDER BY date(ts)",
+                "SELECT date, agent, account, model, tokens, calls
+                 FROM usage_daily ORDER BY date",
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt

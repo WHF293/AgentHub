@@ -293,18 +293,15 @@ export interface ClaudeProviderLive {
 export const claudeProvidersOverview = () =>
   invoke<ClaudeProviderLive>('claude_providers_overview');
 
-export const claudeProviderFetchModels = (input: {
-  base_url: string;
-  api_key?: string;
-  models_url?: string;
-}) => invoke<FetchResult>('claude_provider_fetch_models', { input });
+/** 从已有 Provider 单选厂商 → 自动写 ~/.claude/settings.json env（key 在 Rust 层回读） */
+export const claudeProviderApply = (input: { provider_id: string; model?: string }) =>
+  invoke<string>('claude_provider_apply', { input });
 
-export const claudeProviderSave = (input: {
+/** 厂商内切换模型：只写 ANTHROPIC_MODEL / SMALL_FAST_MODEL（key/base_url 掩码保留） */
+export const claudeProviderSwitchModel = (input: {
   base_url: string;
-  api_key?: string;
-  model?: string;
-  small_fast_model?: string;
-  model_options?: string[];
+  model: string;
+  small_fast_model: string;
 }) => invoke<string>('claude_provider_save', { input });
 
 // ─── M5 WB 账号 ───
@@ -582,6 +579,32 @@ export const usageOverview = (range: string) =>
 export const usageMatrix = () => invoke<MatrixCell[]>('usage_matrix');
 
 export const usageAccounts = () => invoke<UsageAccount[]>('usage_accounts');
+
+// ─── cc-switch 备份导入（另一台电脑的用量并账） ───
+
+/** 导入报告（Rust ImportReport 镜像；token 单位均为 tokens） */
+export interface CcsImportReport {
+  /** 明细表总行数 / 本次新插入事件数 */
+  detail_total: number;
+  detail_new: number;
+  /** 日汇总有效行数 / 合成事件数（30 天前的老数据只有汇总） */
+  rollup_total: number;
+  rollup_new: number;
+  /** 两段数据的本地时间范围（无数据为 null） */
+  detail_range: [string | null, string | null];
+  rollup_range: [string | null, string | null];
+  /** 按 agent 汇总本次新导入的 token */
+  by_agent: {
+    agent: string;
+    events: number;
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_tokens: number;
+  }[];
+}
+
+export const usageImportCcswitch = (path: string) =>
+  invoke<CcsImportReport>('usage_import_ccswitch', { path });
 
 // ─── 在线更新 ───
 

@@ -760,42 +760,42 @@ fn local_date() -> String {
 use tauri::State;
 
 #[tauri::command]
-pub fn memory_global_list(state: State<'_, Store>) -> Result<Vec<MemoryFile>, String> {
+pub async fn memory_global_list(state: State<'_, Store>) -> Result<Vec<MemoryFile>, String> {
     Ok(global_files(&state))
 }
 
 #[tauri::command]
-pub fn memory_read(state: State<'_, Store>, path: String) -> Result<String, String> {
+pub async fn memory_read(state: State<'_, Store>, path: String) -> Result<String, String> {
     read_global(&state, &path)
 }
 
 #[tauri::command]
-pub fn memory_write(state: State<'_, Store>, input: WriteMemoryInput) -> Result<(), String> {
+pub async fn memory_write(state: State<'_, Store>, input: WriteMemoryInput) -> Result<(), String> {
     write_global(&state, &input)
 }
 
 #[tauri::command]
-pub fn memory_global_unify(state: State<'_, Store>) -> Result<Vec<String>, String> {
+pub async fn memory_global_unify(state: State<'_, Store>) -> Result<Vec<String>, String> {
     unify_global_memory(&state)
 }
 
 #[tauri::command]
-pub fn projects_overview(state: State<'_, Store>) -> Result<Vec<ProjectInfo>, String> {
+pub async fn projects_overview(state: State<'_, Store>) -> Result<Vec<ProjectInfo>, String> {
     overview_projects(&state)
 }
 
 #[tauri::command]
-pub fn project_init(state: State<'_, Store>, path: String) -> Result<Vec<String>, String> {
+pub async fn project_init(state: State<'_, Store>, path: String) -> Result<Vec<String>, String> {
     init_project_bridge(&state, &path)
 }
 
 #[tauri::command]
-pub fn project_sync(state: State<'_, Store>, path: String) -> Result<Vec<String>, String> {
+pub async fn project_sync(state: State<'_, Store>, path: String) -> Result<Vec<String>, String> {
     sync_project_bridge(&state, &path)
 }
 
 #[tauri::command]
-pub fn project_consolidate(state: State<'_, Store>, path: String) -> Result<Vec<String>, String> {
+pub async fn project_consolidate(state: State<'_, Store>, path: String) -> Result<Vec<String>, String> {
     consolidate_project_bridge(&state, &path)
 }
 

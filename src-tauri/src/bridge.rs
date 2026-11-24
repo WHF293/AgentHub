@@ -117,6 +117,86 @@ pub fn provider_save(state: State<'_, Store>, input: SaveProviderInput) -> Resul
     }
     Ok(notes.join(" · "))
 }
+/// Claude Code 厂商选用：从已有 Provider 单选一个厂商，自动写 ~/.claude/settings.json env
+/// （base_url + key + 默认模型）。模型切换不在这里 —— 选定厂商后由 Claude 卡内的切换器单独写 MODEL。
+/// Key 只在 Rust 层流转：从 ZCode v2/config.json 回读，不入库 / 不进日志 / 不回前端。
+#[derive(Debug, serde::Deserialize)]
+pub struct ClaudeApplyInput {
+    pub provider_id: String,
+    /// 选厂商时随写的默认模型；None = 清除 MODEL 键走网关默认
+    pub model: Option<String>,
+}
+
+/// 推导 Anthropic 兼容协议 base_url（Claude Code 会拼 {base}/v1/messages）：
+/// - anthropic 型 provider 本身即 Anthropic 协议，原样使用
+/// - 已知厂商按官方文档映射（OpenAI 兼容 base ≠ Anthropic base，如 MiMo /v1 → /anthropic）
+/// - 兜底：剥掉结尾 /v1（new-api 类网关在根路径服务 /v1/messages）
+fn anthropic_base_for(kind: &str, base_url: &str) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    if kind == "anthropic" {
+        return trimmed.to_string();
+    }
+    const KNOWN: [(&str, &str); 3] = [
+        (
+            "api.xiaomimimo.com",
+            "https://api.xiaomimimo.com/anthropic",
+        ),
+        (
+            "token-plan-cn.xiaomimimo.com",
+            "https://token-plan-cn.xiaomimimo.com/anthropic",
+        ),
+        ("api.deepseek.com", "https://api.deepseek.com/anthropic"),
+    ];
+    if let Some(host) = trimmed.split("//").nth(1).map(|s| s.split('/').next().unwrap_or("")) {
+        for (h, ab) in KNOWN {
+            if host.eq_ignore_ascii_case(h) {
+                return ab.to_string();
+            }
+        }
+    }
+    trimmed.strip_suffix("/v1").unwrap_or(trimmed).to_string()
+}
+
+#[tauri::command]
+pub fn claude_provider_apply(state: State<'_, Store>, input: ClaudeApplyInput) -> Result<String, String> {
+    agenthub_core::plugins::require_enabled(&state, "zcode")?;
+    agenthub_core::plugins::require_enabled(&state, "claude")?;
+    let provs = provider_zcode::read_zcode_providers()?;
+    let p = provs
+        .iter()
+        .find(|p| p.id == input.provider_id)
+        .ok_or_else(|| format!("provider 不存在：{}", input.provider_id))?;
+    if p.base_url.is_empty() {
+        return Err(format!("provider「{}」未配置接口地址", p.name));
+    }
+    let key = provider_zcode::resolve_api_key(&input.provider_id, None)?;
+    let base = anthropic_base_for(&p.kind, &p.base_url);
+    let model = input.model.unwrap_or_default();
+    let msg = agenthub_plugin_claude::provider_claude::write_claude_provider(
+        &agenthub_plugin_claude::provider_claude::ClaudeSaveInput {
+            base_url: base.clone(),
+            api_key: Some(key),
+            // Some("") = 清除 MODEL 键（无勾选模型时走网关默认）
+            model: Some(model.clone()),
+            small_fast_model: if model.is_empty() { Some(String::new()) } else { Some(model.clone()) },
+            // provider 全部勾选模型写入清单，卡内切换器数据源
+            model_options: Some(p.models.clone()),
+        },
+    )?;
+    if let Ok(conn_store) = Store::open() {
+        let _ = conn_store.with(|conn| {
+            agenthub_core::store::log_op(
+                conn,
+                "provider.claude_apply",
+                &input.provider_id,
+                serde_json::json!({ "model": model, "provider": p.name, "anthropic_base": base }),
+            );
+            Ok(())
+        });
+    }
+    Ok(format!("已选用 {} · {}", p.name, msg))
+}
+
 #[tauri::command]
 pub fn provider_delete(state: State<'_, Store>, id: String) -> Result<String, String> {
     agenthub_core::plugins::require_enabled(&state, "zcode")?;

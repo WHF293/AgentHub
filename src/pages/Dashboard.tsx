@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 import { getAppStatus, type AppStatus } from '../api';
 import { agentMeta } from '../agents';
 import { AgentCard } from '../common/components/AgentCard';
-import { UsagePage } from './Usage';
+
+// 用量分析（含 ECharts）懒加载：echarts 独立 chunk，不进首屏关键路径
+const UsagePage = lazy(() => import('./Usage').then((m) => ({ default: m.UsagePage })));
 
 /** Usage 岛：已启用插件的健康卡 + 用量分析（概览信息已并入 Setting 岛，页头行已删除） */
 export function DashboardPage() {
@@ -18,8 +20,16 @@ export function DashboardPage() {
 
   useEffect(() => {
     void refresh();
-    const t = setInterval(refresh, 10_000);
-    return () => clearInterval(t);
+    // 30s 降频 + 可见性感知：窗口隐藏（关到托盘）暂停轮询，避免后台积压、恢复前台齐发
+    const tick = () => {
+      if (!document.hidden) void refresh();
+    };
+    const t = setInterval(tick, 30_000);
+    document.addEventListener('visibilitychange', tick);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener('visibilitychange', tick);
+    };
   }, [refresh]);
 
   // 只展示已启用插件（停用的适配器对用户不可见，Plugin 岛可再开启）
@@ -58,8 +68,16 @@ export function DashboardPage() {
         )}
       </div>
 
-      {/* 用量分析 */}
-      <UsagePage />
+      {/* 用量分析（懒加载：首屏先出健康卡，ECharts chunk 并行拉取） */}
+      <Suspense
+        fallback={
+          <div className="card" style={{ padding: 14, color: 'var(--color-text-3)', fontSize: 12 }}>
+            用量分析加载中…
+          </div>
+        }
+      >
+        <UsagePage />
+      </Suspense>
     </div>
   );
 }

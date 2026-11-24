@@ -53,8 +53,9 @@ pub fn read_claude_provider() -> Res<ClaudeProviderLive> {
     Ok(ClaudeProviderLive {
         base_url: get_s("ANTHROPIC_BASE_URL"),
         has_api_key: !get_s("ANTHROPIC_AUTH_TOKEN").is_empty(),
-        model: get_s("ANTHROPIC_MODEL"),
-        small_fast_model: get_s("ANTHROPIC_SMALL_FAST_MODEL"),
+        // 模型值剥掉 [1m] 后缀再回传（写入时自动补回），UI 显示与选中比对用干净名
+        model: strip_1m(&get_s("ANTHROPIC_MODEL")),
+        small_fast_model: strip_1m(&get_s("ANTHROPIC_SMALL_FAST_MODEL")),
         onboarding_done,
         configured: env.is_some(),
         model_options,
@@ -71,6 +72,27 @@ pub struct ClaudeSaveInput {
     pub small_fast_model: Option<String>,
     /// 可选模型清单（拉取列表后保存；None = 不变）
     pub model_options: Option<Vec<String>>,
+}
+
+/// 给模型 ID 追加 [1m] 后缀：Claude Code 对不认识的 ID 默认按 200k 上下文，
+/// 带 [1m] 则按 1M 处理（请求发出前自动剥掉后缀，厂商不可见）；已带后缀则不动。
+fn with_1m(m: &str) -> String {
+    let t = m.trim();
+    if t.is_empty() || t.to_lowercase().ends_with("[1m]") {
+        t.to_string()
+    } else {
+        format!("{t}[1m]")
+    }
+}
+
+/// 剥掉 [1m] 后缀（回读展示 / 分档计算用干净名）
+fn strip_1m(m: &str) -> String {
+    let t = m.trim();
+    if t.len() >= 4 && t[t.len() - 4..].eq_ignore_ascii_case("[1m]") {
+        t[..t.len() - 4].trim_end().to_string()
+    } else {
+        t.to_string()
+    }
 }
 
 fn read_json(path: &std::path::Path) -> Res<Value> {
@@ -92,6 +114,16 @@ pub fn write_claude_provider(w: &ClaudeSaveInput) -> Res<String> {
     if !root.is_object() {
         root = json!({});
     }
+    // 提前读既有 modelOptions（切模型掩码路径没带清单时，档位映射的数据源；避开 root 借用冲突）
+    let existing_options: Vec<String> = root
+        .get("modelOptions")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let obj = root.as_object_mut().unwrap();
     if !obj.contains_key("env") {
         obj.insert("env".into(), json!({}));
@@ -108,7 +140,8 @@ pub fn write_claude_provider(w: &ClaudeSaveInput) -> Res<String> {
     let set_opt = |env: &mut Map<String, Value>, k: &str, v: &Option<String>| {
         match v {
             Some(s) if !s.trim().is_empty() => {
-                env.insert(k.into(), json!(s.trim()));
+                // 模型值统一带 [1m] 后缀（1M 上下文；Claude Code 请求前自动剥掉）
+                env.insert(k.into(), json!(with_1m(s.trim())));
             }
             Some(_) => {
                 env.remove(k);
@@ -118,6 +151,79 @@ pub fn write_claude_provider(w: &ClaudeSaveInput) -> Res<String> {
     };
     set_opt(env, "ANTHROPIC_MODEL", &w.model);
     set_opt(env, "ANTHROPIC_SMALL_FAST_MODEL", &w.small_fast_model);
+    // 内置档位映射：把厂商模型按命名分档铺到 /model 选择器的四个内置别名上
+    // （Opus=最重档 / Sonnet=中档 / Haiku=轻快档 / Fable=剩余档），显示名同步替换
+    // （*_MODEL_NAME，旧版本忽略无害）。清单缺失或单模型时退化为全部跟随主模型。
+    let models_list: Vec<String> = w
+        .model_options
+        .clone()
+        .map(|opts| {
+            opts.into_iter()
+                .filter(|s| !s.trim().is_empty())
+                .collect::<Vec<_>>()
+        })
+        .or_else(|| Some(existing_options.clone()))
+        .unwrap_or_default();
+    let main_raw = env
+        .get("ANTHROPIC_MODEL")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let small_raw = env
+        .get("ANTHROPIC_SMALL_FAST_MODEL")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    // env 里存的是带 [1m] 的值，分档用干净名
+    let main = strip_1m(&main_raw);
+    let small = strip_1m(&small_raw);
+    let fast_kw = ["flash", "lite", "mini", "speed", "fast", "turbo", "nano", "instant"];
+    let heavy_kw = ["ultra", "max", "pro", "plus", "xl", "heavy"];
+    let has_kw = |m: &str, kws: &[&str]| kws.iter().any(|k| m.to_lowercase().contains(k));
+    // Haiku：轻快档（清单里第一个快关键字命中，退化为小模型 / 首个 / 主模型）
+    let haiku = models_list
+        .iter()
+        .find(|m| has_kw(m, &fast_kw))
+        .cloned()
+        .or_else(|| (!small.is_empty()).then(|| small.clone()))
+        .or_else(|| models_list.first().cloned())
+        .unwrap_or_else(|| main.clone());
+    // Opus：最重档（清单里最后一个重关键字命中，退化为末个 / 主模型）
+    let opus = models_list
+        .iter()
+        .rev()
+        .find(|m| has_kw(m, &heavy_kw))
+        .cloned()
+        .or_else(|| models_list.last().cloned())
+        .unwrap_or_else(|| main.clone());
+    // Sonnet：中档 = 清单里第一个非 Opus/Haiku 的模型；Fable：剩余档
+    let sonnet = models_list
+        .iter()
+        .find(|m| *m != &opus && *m != &haiku)
+        .cloned()
+        .unwrap_or_else(|| opus.clone());
+    let fable = models_list
+        .iter()
+        .find(|m| *m != &opus && *m != &sonnet && *m != &haiku)
+        .cloned()
+        .unwrap_or_else(|| sonnet.clone());
+    let aliases = [
+        ("ANTHROPIC_DEFAULT_OPUS_MODEL", opus),
+        ("ANTHROPIC_DEFAULT_SONNET_MODEL", sonnet),
+        ("ANTHROPIC_DEFAULT_FABLE_MODEL", fable),
+        ("ANTHROPIC_DEFAULT_HAIKU_MODEL", haiku),
+    ];
+    let nothing_to_map = main.is_empty() && models_list.is_empty();
+    for (key, val) in aliases {
+        if nothing_to_map || val.is_empty() {
+            env.remove(key);
+            env.remove(&format!("{key}_NAME"));
+        } else {
+            // 档位值带 [1m]（1M 上下文），显示名保持干净模型名
+            env.insert(key.into(), json!(with_1m(&val)));
+            env.insert(format!("{key}_NAME").into(), json!(val));
+        }
+    }
     if let Some(opts) = &w.model_options {
         let list: Vec<String> = opts.iter().map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect();
         if list.is_empty() {
@@ -191,7 +297,7 @@ pub fn resolve_claude_api_key(explicit: Option<&str>) -> Res<String> {
 }
 
 #[tauri::command]
-pub fn claude_providers_overview() -> Result<ClaudeProviderLive, String> {
+pub async fn claude_providers_overview() -> Result<ClaudeProviderLive, String> {
     read_claude_provider()
 }
 
@@ -204,7 +310,7 @@ pub struct ClaudeFetchModelsInput {
 }
 
 #[tauri::command]
-pub fn claude_provider_fetch_models(
+pub async fn claude_provider_fetch_models(
     state: tauri::State<'_, Store>,
     input: ClaudeFetchModelsInput,
 ) -> Result<agenthub_core::modelfetch::FetchResult, String> {
@@ -219,7 +325,7 @@ pub fn claude_provider_fetch_models(
 }
 
 #[tauri::command]
-pub fn claude_provider_save(
+pub async fn claude_provider_save(
     state: tauri::State<'_, Store>,
     input: ClaudeSaveInput,
 ) -> Result<String, String> {

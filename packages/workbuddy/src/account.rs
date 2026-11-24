@@ -82,8 +82,22 @@ pub struct WbOverview {
     pub slots: Vec<WbSlot>,
 }
 
+/// 进程探测缓存：tasklist 子进程要 0.5~2s，轮询场景 3s 内直接复用结果
+static PROC_RUNNING_CACHE: std::sync::Mutex<Option<(std::time::Instant, bool)>> =
+    std::sync::Mutex::new(None);
+
 pub fn process_running() -> bool {
-    Command::new("tasklist")
+    {
+        let g = PROC_RUNNING_CACHE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some((at, v)) = &*g {
+            if at.elapsed() < std::time::Duration::from_secs(3) {
+                return *v;
+            }
+        }
+    }
+    let running = Command::new("tasklist")
         .args(["/FI", "IMAGENAME eq WorkBuddy.exe", "/NH"])
         .creation_flags(CREATE_NO_WINDOW)
         .output()
@@ -91,7 +105,11 @@ pub fn process_running() -> bool {
             let s = String::from_utf8_lossy(&out.stdout);
             s.to_lowercase().contains("workbuddy.exe")
         })
-        .unwrap_or(false)
+        .unwrap_or(false);
+    *PROC_RUNNING_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some((std::time::Instant::now(), running));
+    running
 }
 
 /// 强杀 WB（UI 侧必须先二次确认；工具不静默调用）
@@ -405,7 +423,7 @@ pub fn delete_slot(store: &Store, slot_id: &str) -> Res<()> {
 use tauri::State;
 
 #[tauri::command]
-pub fn wb_overview(state: State<'_, Store>) -> Result<WbOverview, String> {
+pub async fn wb_overview(state: State<'_, Store>) -> Result<WbOverview, String> {
     overview(&state)
 }
 
@@ -417,7 +435,7 @@ pub struct SlotRenameInput {
 }
 
 #[tauri::command]
-pub fn wb_rename_slot(state: State<'_, Store>, input: SlotRenameInput) -> Result<(), String> {
+pub async fn wb_rename_slot(state: State<'_, Store>, input: SlotRenameInput) -> Result<(), String> {
     agenthub_core::plugins::require_enabled(&state, "workbuddy")?;
     let label = input.label.trim();
     if label.is_empty() {
@@ -435,7 +453,7 @@ pub fn wb_rename_slot(state: State<'_, Store>, input: SlotRenameInput) -> Result
 }
 
 #[tauri::command]
-pub fn wb_save_slot(state: State<'_, Store>, label: String) -> Result<WbSlot, String> {
+pub async fn wb_save_slot(state: State<'_, Store>, label: String) -> Result<WbSlot, String> {
     agenthub_core::plugins::require_enabled(&state, "workbuddy")?;
     save_slot(&state, &label)
 }
@@ -451,7 +469,7 @@ pub struct SwitchInput {
 }
 
 #[tauri::command]
-pub fn wb_switch(state: State<'_, Store>, input: SwitchInput) -> Result<SwitchReport, String> {
+pub async fn wb_switch(state: State<'_, Store>, input: SwitchInput) -> Result<SwitchReport, String> {
     agenthub_core::plugins::require_enabled(&state, "workbuddy")?;
     if process_running() {
         if !input.confirm_kill {
@@ -468,13 +486,13 @@ pub fn wb_switch(state: State<'_, Store>, input: SwitchInput) -> Result<SwitchRe
 }
 
 #[tauri::command]
-pub fn wb_import_legacy(state: State<'_, Store>) -> Result<usize, String> {
+pub async fn wb_import_legacy(state: State<'_, Store>) -> Result<usize, String> {
     agenthub_core::plugins::require_enabled(&state, "workbuddy")?;
     import_legacy(&state)
 }
 
 #[tauri::command]
-pub fn wb_delete_slot(state: State<'_, Store>, slot: String) -> Result<(), String> {
+pub async fn wb_delete_slot(state: State<'_, Store>, slot: String) -> Result<(), String> {
     agenthub_core::plugins::require_enabled(&state, "workbuddy")?;
     delete_slot(&state, &slot)
 }

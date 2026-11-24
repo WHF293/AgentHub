@@ -130,6 +130,15 @@ impl AgentAdapter for ClaudeAdapter {
         McpConfig { path: claude_json(), container: &["mcpServers"] }
     }
 
+    /// 收编类型名归一：Claude 的 http → 规范型 streamableHttp（写回时翻译回去）
+    fn canonical_kind(&self, kind: &str) -> String {
+        if kind == "http" {
+            "streamableHttp".into()
+        } else {
+            kind.into()
+        }
+    }
+
     /// Claude mcpServers 条目无禁用字段（删条目 = 停用），非对象/空条目视作异常禁用态
     fn mcp_entry_live(&self, entry: &Value) -> McpLive {
         let ok = entry.as_object().map(|o| {

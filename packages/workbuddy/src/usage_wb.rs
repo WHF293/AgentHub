@@ -257,7 +257,14 @@ fn collect_wb_projects(store: &Store, app: Option<&AppHandle>) -> Res<usize> {
             emit_progress(app, "workbuddy", i + 1, total);
             continue;
         }
-        let start = if mtime == last_mtime { last_offset } else { 0 };
+        // 增量续扫：jsonl 是 append-only，mtime 变化只代表有追加 → 从上次偏移继续读；
+        // 仅文件变短（截断/轮转/重写）才回 0 全量重扫（INSERT OR IGNORE 幂等兜底）。
+        // 旧逻辑「mtime 变化就从 0 重扫」会把 WB 运行时活跃会话大文件整读整解析，采集动辄 20s+。
+        let start = if last_offset > 0 && file_len >= last_offset {
+            last_offset
+        } else {
+            0
+        };
         let (events, new_offset) = collect_wb_jsonl_file(p, start, &accounts)?;
         total_inserted += insert_wb_events(store, &events)?;
         cursor_set(store, "wb-projects", &fp, new_offset, mtime)?;

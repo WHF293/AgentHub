@@ -291,13 +291,13 @@ pub async fn update_install(app: tauri::AppHandle, input: InstallInput) -> Resul
 
 /// 读更新代理地址（设置岛「更新代理」；空 = 直连）
 #[tauri::command]
-pub fn update_proxy_get() -> String {
-    read_update_proxy().unwrap_or_default()
+pub async fn update_proxy_get() -> Result<String, String> {
+    Ok(read_update_proxy().unwrap_or_default())
 }
 
 /// 设置更新代理地址（空串 = 清除恢复直连）；写入即生效（每次请求新建 client 时读取）
 #[tauri::command]
-pub fn update_proxy_set(url: String) -> Result<(), String> {
+pub async fn update_proxy_set(url: String) -> Result<(), String> {
     let url = url.trim().to_string();
     // 非空时先试建代理对象，避免存进一个用不了的地址
     if !url.is_empty() {

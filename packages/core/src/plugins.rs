@@ -230,21 +230,21 @@ pub struct PluginListPayload {
 }
 
 #[tauri::command]
-pub fn plugin_list(state: State<'_, Store>) -> Result<PluginListPayload, String> {
+pub async fn plugin_list(state: State<'_, Store>) -> Result<PluginListPayload, String> {
     Ok(PluginListPayload { items: list(&state)? })
 }
 
 #[tauri::command]
-pub fn plugin_toggle(state: State<'_, Store>, agent: String, enabled: bool) -> Result<(), String> {
+pub async fn plugin_toggle(state: State<'_, Store>, agent: String, enabled: bool) -> Result<(), String> {
     set_enabled(&state, &agent, enabled)
 }
 
 #[tauri::command]
-pub fn plugin_install(state: State<'_, Store>, agent: String) -> Result<(), String> {
+pub async fn plugin_install(state: State<'_, Store>, agent: String) -> Result<(), String> {
     set_installed(&state, &agent, true)
 }
 
 #[tauri::command]
-pub fn plugin_uninstall(state: State<'_, Store>, agent: String) -> Result<(), String> {
+pub async fn plugin_uninstall(state: State<'_, Store>, agent: String) -> Result<(), String> {
     set_installed(&state, &agent, false)
 }

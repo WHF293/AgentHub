@@ -15,5 +15,13 @@ export default defineConfig({
     target: 'chrome110',
     minify: 'esbuild',
     sourcemap: false,
+    rollupOptions: {
+      output: {
+        // echarts 拆独立 chunk（Usage 页懒加载时才拉取），首屏 bundle 减半、冷启动更快
+        manualChunks: {
+          echarts: ['echarts'],
+        },
+      },
+    },
   },
 });

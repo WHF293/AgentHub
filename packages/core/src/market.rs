@@ -233,13 +233,13 @@ pub fn install(store: &Store, name: &str) -> Res<()> {
 use tauri::State;
 
 #[tauri::command]
-pub fn market_refresh() -> Result<MarketCatalog, String> {
+pub async fn market_refresh() -> Result<MarketCatalog, String> {
     Ok(refresh_all())
 }
 
 /// 安装后重算 installed 标记返回最新目录
 #[tauri::command]
-pub fn market_install(state: State<'_, Store>, name: String) -> Result<MarketCatalog, String> {
+pub async fn market_install(state: State<'_, Store>, name: String) -> Result<MarketCatalog, String> {
     install(&state, &name)?;
     Ok(refresh_all())
 }

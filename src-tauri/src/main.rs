@@ -138,10 +138,19 @@ fn main() {
         let store = agenthub_lib::store::Store::open().expect("初始化 ~/.agenthub 失败");
         match agenthub_plugin_claude::ccsimport::import_backup(&store, &path) {
             Ok(report) => {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&report).expect("serialize")
-                );
+                // 导入的旧数据不在采集游标里，主动重建 usage_daily 预聚合让 matrix/日历立即可见
+                if agenthub_lib::usage::refresh_daily_agg(&store).is_ok() {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&report).expect("serialize")
+                    );
+                } else {
+                    eprintln!("导入成功但 usage_daily 重建失败（下次采集会自动补偿）");
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&report).expect("serialize")
+                    );
+                }
             }
             Err(e) => {
                 eprintln!("导入失败: {e}");

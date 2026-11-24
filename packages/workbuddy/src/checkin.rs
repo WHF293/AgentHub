@@ -523,8 +523,8 @@ pub async fn wb_checkin_claim(input: WbCheckinInput) -> Result<WbCheckinResult, 
 // ─── 启动自动领取 + 开关 ───
 
 #[tauri::command]
-pub fn wb_checkin_auto_get() -> bool {
-    auto_checkin_enabled()
+pub async fn wb_checkin_auto_get() -> Result<bool, String> {
+    Ok(auto_checkin_enabled())
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -533,7 +533,7 @@ pub struct WbCheckinAutoInput {
 }
 
 #[tauri::command]
-pub fn wb_checkin_auto_set(state: State<'_, Store>, input: WbCheckinAutoInput) -> Result<(), String> {
+pub async fn wb_checkin_auto_set(state: State<'_, Store>, input: WbCheckinAutoInput) -> Result<(), String> {
     let _ = &state;
     std::fs::create_dir_all(keys_dir()).map_err(|e| e.to_string())?;
     fsutil::atomic_write(&auto_checkin_file(), if input.enabled { b"1" } else { b"0" })

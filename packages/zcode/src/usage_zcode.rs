@@ -157,7 +157,12 @@ fn collect_zcode_rollout(store: &Store) -> Res<usize> {
         if mtime == last_mtime && last_offset >= file_len {
             continue;
         }
-        let start = if mtime == last_mtime { last_offset } else { 0 };
+        // append-only 增量续扫（同 usage_wb）：mtime 变化从上次偏移继续，仅文件变短才全量重扫
+        let start = if last_offset > 0 && file_len >= last_offset {
+            last_offset
+        } else {
+            0
+        };
 
         let Ok(mut file) = std::fs::File::open(&path) else { continue };
         if start > 0 {

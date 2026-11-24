@@ -175,7 +175,12 @@ pub fn collect(store: &Store, app: Option<&AppHandle>) -> Res<usize> {
             emit_progress(app, "claude", i + 1, total);
             continue;
         }
-        let start = if mtime == last_mtime { last_offset } else { 0 };
+        // append-only 增量续扫（同 usage_wb）：mtime 变化从上次偏移继续，仅文件变短才全量重扫
+        let start = if last_offset > 0 && file_len >= last_offset {
+            last_offset
+        } else {
+            0
+        };
         let (events, new_offset) = collect_claude_jsonl_file(p, start)?;
         total_inserted += insert_claude_events(store, &events)?;
         cursor_set(store, "claude-projects", &fp, new_offset, mtime)?;

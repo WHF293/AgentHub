@@ -42,6 +42,13 @@ import { isAgentEnabled, useEnabledAgents } from '../stores/plugins';
 
 const mask = (s: string) => (s.length > 8 ? `${s.slice(0, 6)}…` : s || '—');
 
+/** 签到状态当日缓存（wb_checkin_status 逐账号拉起 WB 解密 + HTTP，秒级；先渲染缓存） */
+const CHECKIN_CACHE_KEY = 'agenthub.checkinCache.v1';
+const todayKey = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
 type WbConfirmState =
   | { kind: 'switch'; slotId: string; label: string }
   | { kind: 'delete'; slotId: string; label: string }
@@ -235,10 +242,27 @@ export function AccountsPage() {
     }
   }, []);
 
-  /** 签到状态查询（登录态文件 + 槽位逐账号；挂载/切号/手动刷新时调用） */
+  /** 签到状态查询（登录态文件 + 槽位逐账号；挂载/切号/手动刷新时调用）。
+   *  Rust 侧逐账号 ELECTRON_RUN_AS_NODE 拉起 WB 解密 token + HTTP 查询，秒级耗时；
+   *  先渲染当日 localStorage 缓存立即出完整卡片，后台刷新完成后替换。 */
   const refreshCheckins = useCallback(async () => {
     try {
-      setCheckins(await wbCheckinStatus());
+      const cached = localStorage.getItem(CHECKIN_CACHE_KEY);
+      if (cached) {
+        const v = JSON.parse(cached) as { date: string; list: WbCheckinStatus[] };
+        if (v.date === todayKey() && Array.isArray(v.list)) setCheckins(v.list);
+      }
+    } catch {
+      /* 缓存损坏忽略 */
+    }
+    try {
+      const list = await wbCheckinStatus();
+      setCheckins(list);
+      try {
+        localStorage.setItem(CHECKIN_CACHE_KEY, JSON.stringify({ date: todayKey(), list }));
+      } catch {
+        /* 配额满忽略 */
+      }
     } catch {
       /* 浏览器预览等场景忽略 */
     }
@@ -313,12 +337,24 @@ export function AccountsPage() {
     if (isAgentEnabled(enabledIds, 'zcode')) void refreshZcQuota();
     // WB 侧账号/进程可能随时变化（手动切号、启动退出），轮询保持实时
     // （签到状态走网络按账号查询，只在上面的挂载/切号/手动刷新时更新，不进轮询）
-    const t = setInterval(() => {
+    // 可见性感知：窗口隐藏（关到托盘）暂停轮询，避免后台定时器积压、恢复前台时齐发卡顿；
+    // 30s 降频（Rust 侧 process_running 已有 3s 缓存，切号检测仍及时）
+    const POLL_MS = 30_000;
+    const tick = () => {
+      if (document.hidden) return;
       void refresh();
       void refreshCredit();
       void refreshZc();
-    }, 10_000);
-    return () => clearInterval(t);
+    };
+    const onVis = () => {
+      if (!document.hidden) tick();
+    };
+    const t = setInterval(tick, POLL_MS);
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener('visibilitychange', onVis);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refresh, refreshCredit, refreshCheckins, refreshZc, refreshZcQuota, enabledIds]);
 

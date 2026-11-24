@@ -67,7 +67,7 @@ fn agent_status(a: &'static dyn adapters::AgentAdapter, plugin_enabled: bool) ->
 
 /// 启动探测：中央仓库 / 各适配器安装态与插件启用态 / 链接策略
 #[tauri::command]
-pub fn app_status(store_state: State<'_, Store>) -> AppStatus {
+pub async fn app_status(store_state: State<'_, Store>) -> Result<AppStatus, String> {
     store::ensure_hub_dirs().ok();
     let plugin_enabled = |id: &str| {
         plugins::list(&store_state)
@@ -76,7 +76,7 @@ pub fn app_status(store_state: State<'_, Store>) -> AppStatus {
             .map(|p| p.enabled)
             .unwrap_or(false)
     };
-    AppStatus {
+    Ok(AppStatus {
         hub_initialized: store::db_path().exists(),
         central_skills_count: adapters::scan_skills_dir(&store::central_skills_dir()).len(),
         link_mode: migrate::parse_link_mode(None).as_str().to_string(),
@@ -84,12 +84,12 @@ pub fn app_status(store_state: State<'_, Store>) -> AppStatus {
             .iter()
             .map(|a| agent_status(*a, plugin_enabled(a.id())))
             .collect(),
-    }
+    })
 }
 
 /// M1 一键迁移：各启用端 skills 并集导入中央仓库 → 按各端策略建链
 #[tauri::command]
-pub fn run_skills_migration(
+pub async fn run_skills_migration(
     store_state: State<'_, Store>,
     mode: Option<String>,
 ) -> Result<migrate::MigrateReport, String> {
@@ -120,7 +120,7 @@ pub struct SkillOverviewItem {
 }
 
 #[tauri::command]
-pub fn skills_overview(store_state: State<'_, Store>) -> Result<Vec<SkillOverviewItem>, String> {
+pub async fn skills_overview(store_state: State<'_, Store>) -> Result<Vec<SkillOverviewItem>, String> {
     store::ensure_hub_dirs()?;
     let central = store::central_skills_dir();
     let central_list = adapters::scan_skills_dir(&central);
@@ -191,7 +191,7 @@ pub fn skills_overview(store_state: State<'_, Store>) -> Result<Vec<SkillOvervie
 
 /// 单 skill 在单端重建链接（断链修复 / 分发）；端必须为已启用插件
 #[tauri::command]
-pub fn relink_skill(
+pub async fn relink_skill(
     store_state: State<'_, Store>,
     name: String,
     agent: String,
@@ -253,7 +253,7 @@ pub fn relink_skill(
 /// 启停 skill：DB 状态 + 写穿 WB「允许模型自动调用」（备份 → 原子写）。
 /// ZCode 无 per-skill 禁用机制，不写 ZCode 侧；返回同步结果消息。
 #[tauri::command]
-pub fn set_skill_enabled(
+pub async fn set_skill_enabled(
     store_state: State<'_, Store>,
     name: String,
     enabled: bool,
@@ -297,7 +297,7 @@ fn remove_skill_ref(target: &std::path::Path, backups: &std::path::Path) -> Resu
 
 /// 删除 skill：各启用端引用移除 + 中央仓库源文件删除前自动备份 + DB 行清理
 #[tauri::command]
-pub fn skill_delete(store_state: State<'_, Store>, name: String) -> Result<(), String> {
+pub async fn skill_delete(store_state: State<'_, Store>, name: String) -> Result<(), String> {
     let central = store::central_skills_dir();
     let central_skill = central.join(&name);
     if !central_skill.is_dir() {
@@ -343,7 +343,7 @@ pub struct OpLogRow {
 }
 
 #[tauri::command]
-pub fn recent_op_log(store_state: State<'_, Store>, limit: i64) -> Result<Vec<OpLogRow>, String> {
+pub async fn recent_op_log(store_state: State<'_, Store>, limit: i64) -> Result<Vec<OpLogRow>, String> {
     store_state.with(|conn| {
         let mut stmt = conn
             .prepare(
@@ -372,6 +372,7 @@ pub fn recent_op_log(store_state: State<'_, Store>, limit: i64) -> Result<Vec<Op
 
 /// 关闭行为切换：true = 关到托盘（默认），false = 直接退出（设置岛）
 #[tauri::command]
-pub fn set_close_to_tray(enabled: bool) {
+pub async fn set_close_to_tray(enabled: bool) -> Result<(), String> {
     crate::CLOSE_TO_TRAY.store(enabled, std::sync::atomic::Ordering::Relaxed);
+    Ok(())
 }

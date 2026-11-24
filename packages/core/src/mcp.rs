@@ -314,13 +314,22 @@ pub fn adopt_from_targets(store: &Store, overwrite: bool) -> Res<usize> {
                 };
                 enabled.insert(a.id().to_string(), a.mcp_enabled_of(Some(entry)));
                 if kind.is_none() {
-                    kind = Some(
-                        entry
-                            .get("type")
-                            .and_then(Value::as_str)
-                            .map(|k| a.canonical_kind(k))
-                            .unwrap_or_else(|| "stdio".into()),
-                    );
+                    // 无 type 的裸 url 条目（Claude/通用手写格式）→ HTTP 型推断；有 command → stdio
+                    let bare_url = entry
+                        .get("url")
+                        .and_then(Value::as_str)
+                        .map(|s| !s.trim().is_empty())
+                        .unwrap_or(false);
+                    let has_command = entry
+                        .get("command")
+                        .and_then(Value::as_str)
+                        .map(|s| !s.trim().is_empty())
+                        .unwrap_or(false);
+                    kind = Some(match entry.get("type").and_then(Value::as_str) {
+                        Some(k) => a.canonical_kind(k),
+                        None if bare_url && !has_command => "streamableHttp".into(),
+                        None => "stdio".into(),
+                    });
                 }
                 if command.is_none() {
                     command = entry.get("command").and_then(Value::as_str).map(String::from);
@@ -484,19 +493,19 @@ pub struct McpOverviewPayload {
 }
 
 #[tauri::command]
-pub fn mcp_overview(state: State<'_, Store>) -> Result<McpOverviewPayload, String> {
+pub async fn mcp_overview(state: State<'_, Store>) -> Result<McpOverviewPayload, String> {
     let (items, drift) = overview(&state)?;
     Ok(McpOverviewPayload { items, drift })
 }
 
 /// 收编目标文件现有 server 进统一定义（首次接管 / 漂移回填）
 #[tauri::command]
-pub fn mcp_adopt(state: State<'_, Store>, overwrite: bool) -> Result<usize, String> {
+pub async fn mcp_adopt(state: State<'_, Store>, overwrite: bool) -> Result<usize, String> {
     adopt_from_targets(&state, overwrite)
 }
 
 #[tauri::command]
-pub fn mcp_save(state: State<'_, Store>, server: McpServer) -> Result<(), String> {
+pub async fn mcp_save(state: State<'_, Store>, server: McpServer) -> Result<(), String> {
     state.with(|conn| {
         upsert_server(conn, &server)?;
         store::log_op(
@@ -512,7 +521,7 @@ pub fn mcp_save(state: State<'_, Store>, server: McpServer) -> Result<(), String
 }
 
 #[tauri::command]
-pub fn mcp_toggle(
+pub async fn mcp_toggle(
     state: State<'_, Store>,
     name: String,
     agent: String,
@@ -532,13 +541,13 @@ pub fn mcp_toggle(
 }
 
 #[tauri::command]
-pub fn mcp_delete(state: State<'_, Store>, name: String) -> Result<(), String> {
+pub async fn mcp_delete(state: State<'_, Store>, name: String) -> Result<(), String> {
     remove_and_sync(&state, &name)
 }
 
 /// 校验目标文件：重算各端 diff（含漂移）
 #[tauri::command]
-pub fn mcp_validate(state: State<'_, Store>) -> Result<McpOverviewPayload, String> {
+pub async fn mcp_validate(state: State<'_, Store>) -> Result<McpOverviewPayload, String> {
     let (items, drift) = overview(&state)?;
     state.with(|conn| {
         store::log_op(
@@ -757,7 +766,19 @@ fn test_http(s: &McpServer) -> McpTestResult {
                     message: format!("HTTP {status} · 握手成功"),
                 }
             } else {
-                fail(format!("HTTP {status}"))
+                // 401/403 时带上 WWW-Authenticate 提示（OAuth 保护的远程 MCP 常见）
+                let auth = resp
+                    .headers()
+                    .get("www-authenticate")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("");
+                if status.as_u16() == 401 || status.as_u16() == 403 {
+                    fail(format!(
+                        "HTTP {status} · 端点要求授权（{auth}）—— OAuth 保护的远程 MCP 请在支持授权流程的客户端（如 Claude Code /mcp）完成浏览器授权，或在编辑里配置 Authorization header"
+                    ))
+                } else {
+                    fail(format!("HTTP {status}"))
+                }
             }
         }
         Err(e) => fail(format!("请求失败：{e}")),
@@ -778,8 +799,15 @@ pub async fn mcp_test_connection(
             .ok_or_else(|| format!("统一定义中无此 server：{name}"))?
     };
     let r = tauri::async_runtime::spawn_blocking(move || match server.kind.as_str() {
-        "streamableHttp" => test_http(&server),
-        _ => test_stdio(&server),
+        "streamableHttp" | "http" | "sse" => test_http(&server),
+        // 兜底：stdio 存档但缺 command 且有 url（历史数据）→ 按 HTTP 握手
+        _ => {
+            if server.command.as_deref().map(|c| c.trim().is_empty()).unwrap_or(true) && server.url.is_some() {
+                test_http(&server)
+            } else {
+                test_stdio(&server)
+            }
+        }
     })
     .await
     .map_err(|e| format!("测试任务失败：{e}"))?;

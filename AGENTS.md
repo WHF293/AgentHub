@@ -4,7 +4,7 @@
 
 ## 项目概述
 
-**AgentHub**（v0.7.4）— AI Agent 统一管理工具（Tauri 2 Windows 桌面应用）：**monorepo 插件化
+**AgentHub**（v0.7.5）— AI Agent 统一管理工具（Tauri 2 Windows 桌面应用）：**monorepo 插件化
 架构**（Cargo workspace：packages/core 共享内核 + packages/{workbuddy,zcode,claude} 插件包 +
 src-tauri 壳；社区可按 AgentAdapter 接口新增 packages/<id> 插件包），提供
 Skills / MCP / 第三方模型 / 多账号 / Memory / 用量分析一站式管理台，替代已卸载的 cc-switch。
@@ -131,10 +131,23 @@ src-tauri/              agenthub 壳：tauri 窗口/托盘/单实例/自启 + PL
      历史事件已一次性清除
    - WB：`~/.workbuddy/projects/**/*.jsonl` 的 `providerData.rawUsage/usage`（请求级真实 usage；
      rawUsage.credit = 官方积分，与账单同源；prompt_tokens 含缓存命中 → input = prompt − 命中）
-   - 字节偏移增量解析 + mtime 变化重扫兜底 + request_id 去重
+   - 字节偏移增量解析（append-only 续扫；仅文件变短/轮转才从 0 重扫，INSERT OR IGNORE 幂等兜底）
+     + request_id 去重。注意：旧「mtime 变化从 0 重扫」方案已废弃（WB 活跃会话大文件整读整解析，
+     采集动辄 20s+，2026-11-24 性能定版）
 6. **采集不卡 UI**：usage 命令全部 async + 分批短锁（400 条/批）+ `usage-collect-progress`
-   事件推前端进度条 + COLLECTING 原子互斥防重入；应用启动即后台线程独立 WAL 连接全量+增量采集
-   （不依赖页面打开）；历史永久留存 `~/.agenthub/agenthub.db`，卸载双 Agent 后仍可查
+   事件推前端进度条（emit_progress 节流：百分比变化且间隔 ≥300ms 才发）+ COLLECTING 原子互斥防重入；
+   应用启动即后台常驻线程独立 WAL 连接采集（启动全量一次，之后每 60s 增量巡检，不依赖页面打开）；
+   历史永久留存 `~/.agenthub/agenthub.db`，卸载双 Agent 后仍可查
+6.5. **IPC 命令一律 async（硬性）**：sync 命令在主线程执行，内部任何阻塞 IO/子进程
+   （tasklist / 文件扫描 / DB）都会冻结窗口消息泵 →「未响应」假死。全部 `#[tauri::command]`
+   用 `pub async fn`（非 Result 返回也要包 Result）；长阻塞（usage_collect / checkin / 网络）
+   一律 `spawn_blocking`；Store::open 已设 busy_timeout=5s（WAL 多连接并发写必需）。
+   process_running() 有 3s 缓存，勿在命令里裸跑 tasklist。
+6.6. **Usage 性能三件套（2026-11-24 定版）**：① `usage_daily` 预聚合表（日×agent×account×model，
+   采集有新增时重建；matrix/日历只读预聚合，勿回退全表 GROUP BY）；② 前端 Usage 数据
+   localStorage 持久化（key `agenthub.usageCache.v1`，先渲染后更新；采集由后台线程负责，
+   前端只查库，手动「刷新」按钮才触发 usage_collect）；③ 所有页面轮询 30s + visibilitychange
+   感知（窗口隐藏暂停、恢复可见立即刷），防后台定时器积压导致切回前台齐发卡顿
 7. **软链策略（适配器声明）**：ZCode 整目录链 → `~/.agenthub/skills`；WB 逐项链 —— 由
    AgentAdapter::skills_link() 声明，引擎不硬编码；symlink 探测失败降级 junction；
    所有替换先备份实目录。注意 WB 是「活端」会自发重写 skills 目录打掉软链（云同步/CDN 下载），

@@ -530,7 +530,7 @@ pub fn backup_db(dest_dir: &Path) -> Res<()> {
 use tauri::State;
 
 #[tauri::command]
-pub fn wb_session_list(state: State<'_, Store>, uid: String) -> Result<Vec<WbSessionInfo>, String> {
+pub async fn wb_session_list(state: State<'_, Store>, uid: String) -> Result<Vec<WbSessionInfo>, String> {
     agenthub_core::plugins::require_enabled(&state, "workbuddy")?;
     list_sessions(&state, &uid)
 }
@@ -569,7 +569,7 @@ pub struct SessionCopyReport {
 /// 独立复制命令：与切号链路解耦，直接把源账号会话复制给 1..N 个目标账号。
 /// 复制要写 workbuddy.db，绝不热写 —— WB 运行中需 confirm_kill 先关闭，完成后重启还原。
 #[tauri::command]
-pub fn wb_session_copy(
+pub async fn wb_session_copy(
     state: State<'_, Store>,
     input: SessionCopyInput,
 ) -> Result<SessionCopyReport, String> {

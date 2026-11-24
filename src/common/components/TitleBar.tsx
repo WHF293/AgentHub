@@ -101,8 +101,13 @@ export function TitleBar() {
     };
 
     syncMaximized();
+    // 防抖：拖拽调整窗口时 resize 事件逐帧触发，每帧一次 IPC 往返会造成拖拽卡顿
+    let debounce: ReturnType<typeof setTimeout> | null = null;
     void appWindow
-      .onResized(() => syncMaximized())
+      .onResized(() => {
+        if (debounce) clearTimeout(debounce);
+        debounce = setTimeout(syncMaximized, 200);
+      })
       .then((fn) => {
         if (disposed) fn();
         else unlisten = fn;
@@ -110,6 +115,7 @@ export function TitleBar() {
 
     return () => {
       disposed = true;
+      if (debounce) clearTimeout(debounce);
       unlisten?.();
     };
   }, [canControlWindow]);

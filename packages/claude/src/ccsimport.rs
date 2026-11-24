@@ -346,3 +346,19 @@ fn do_import(store: &Store, src: &rusqlite::Connection) -> Res<ImportReport> {
         },
     })
 }
+
+/// IPC 导入命令（Usage 岛「导入」按钮）：文件路径由前端 dialog 插件选好传入。
+/// 阻塞解析放 spawn_blocking 独立线程池（2MB+ dump 的建库执行是秒级 IO）；
+/// 独立 WAL 连接不与 UI 抢锁；导入成功后重建 usage_daily 预聚合，
+/// matrix/日历立即反映新数据。
+#[tauri::command]
+pub async fn usage_import_ccswitch(path: String) -> Result<ImportReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = agenthub_core::store::Store::open().map_err(|e| e.to_string())?;
+        let report = import_backup(&store, &path).map_err(|e| e.to_string())?;
+        agenthub_core::usage::refresh_daily_agg(&store).map_err(|e| e.to_string())?;
+        Ok(report)
+    })
+    .await
+    .map_err(|e| format!("导入线程失败: {e}"))?
+}

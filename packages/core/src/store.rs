@@ -40,6 +40,8 @@ impl Store {
             .map_err(|e| e.to_string())?;
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(|e| e.to_string())?;
+        // 多连接并发写（启动采集线程 / UI 命令）在 WAL 模式下需要等锁，默认 0 会直接报 SQLITE_BUSY
+        let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
         let store = Store {
             conn: Mutex::new(conn),
         };
@@ -210,6 +212,20 @@ impl Store {
                  );",
             )
             .map_err(|e| format!("wb_session_links 建表失败: {e}"))?;
+            // v2.2：用量日粒度预聚合（matrix/日历直接读汇总，不再全表 GROUP BY；
+            // 采集有新增时由 usage::refresh_daily_agg 重建）
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS usage_daily (
+                   date TEXT NOT NULL,
+                   agent TEXT NOT NULL,
+                   account TEXT NOT NULL,
+                   model TEXT NOT NULL,
+                   tokens INTEGER NOT NULL,
+                   calls INTEGER NOT NULL,
+                   PRIMARY KEY (date, agent, account, model)
+                 );",
+            )
+            .map_err(|e| format!("usage_daily 建表失败: {e}"))?;
             // 内置双市场（WB 市场为占位：接口探测未果前降级本地扫描）
             conn.execute(
                 "INSERT OR IGNORE INTO skill_sources(id, name, type, url, enabled) VALUES

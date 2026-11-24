@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
+import { open as openFileDialog } from '@tauri-apps/plugin-dialog';
 import { agentChipClass, agentColor as agentColorOf } from '../agents';
 import * as echarts from 'echarts/core';
 import {
@@ -13,9 +14,11 @@ import { CanvasRenderer } from 'echarts/renderers';
 import {
   usageAccounts,
   usageCollect,
+  usageImportCcswitch,
   usageMatrix,
   usageOverview,
   wbOverview,
+  type CcsImportReport,
   type MatrixCell,
   type UsageAccount,
   type UsageOverview,
@@ -139,6 +142,8 @@ interface Bucket {
   tokens: number;
   calls: number;
   details: { agent: string; account: string; model: string; tokens: number }[];
+  /** details 的 O(1) 索引（key = agent|account|model），buildBuckets 内部使用 */
+  detailIdx: Map<string, { agent: string; account: string; model: string; tokens: number }>;
 }
 
 function buildBuckets(matrix: MatrixCell[]): {
@@ -152,7 +157,7 @@ function buildBuckets(matrix: MatrixCell[]): {
   const touch = (m: Map<string, Bucket>, k: string) => {
     let b = m.get(k);
     if (!b) {
-      b = { tokens: 0, calls: 0, details: [] };
+      b = { tokens: 0, calls: 0, details: [], detailIdx: new Map() };
       m.set(k, b);
     }
     return b;
@@ -165,12 +170,15 @@ function buildBuckets(matrix: MatrixCell[]): {
     for (const b of [bDay, bMon, by]) {
       b.tokens += c.tokens;
       b.calls += c.calls;
-      // 同 agent-account-model 合并（月/年桶跨天重复出现，必须聚合而非逐条追加）
-      const ex = b.details.find(
-        (d) => d.agent === c.agent && d.account === c.account && d.model === c.model,
-      );
+      // 同 agent-account-model 合并：O(1) Map 索引（旧 find 线性扫描在大矩阵下 O(n²)）
+      const key = `${c.agent}|${c.account}|${c.model}`;
+      const ex = b.detailIdx.get(key);
       if (ex) ex.tokens += c.tokens;
-      else b.details.push({ agent: c.agent, account: c.account, model: c.model, tokens: c.tokens });
+      else {
+        const d = { agent: c.agent, account: c.account, model: c.model, tokens: c.tokens };
+        b.details.push(d);
+        b.detailIdx.set(key, d);
+      }
     }
   }
   return { byDay, byMonth, byYear };
@@ -222,17 +230,38 @@ function useEChart(factory: () => echarts.EChartsCoreOption, deps: unknown[]) {
 }
 
 /**
- * 模块级数据缓存（组件卸载不丢）：页面切换回来时若缓存仍在有效期内，
- * 直接复用、跳过全量采集（usageCollect 要扫 jsonl，是最重的一步）。
- * 「刷新」按钮 / 5min 轮询才真正重新采集。
+ * 数据缓存（内存 + localStorage 持久化）：
+ * - 内存缓存：页面切换回来时直接复用；
+ * - localStorage：应用重启/长时间后台后也能立即渲染上次的完整数据（先渲染后更新）。
+ * 采集由 Rust 侧后台线程每 60s 增量执行，前端只查库（usage_daily 预聚合，毫秒级）；
+ * 「刷新」按钮才主动触发一次采集。
  */
+const CACHE_KEY = 'agenthub.usageCache.v1';
 const CACHE_TTL = 5 * 60 * 1000;
-let dataCache: {
+interface UsageCacheShape {
   at: number;
   matrix: MatrixCell[];
   accounts: UsageAccount[];
   slotLabels: Record<string, string>;
-} | null = null;
+}
+const loadPersisted = (): UsageCacheShape | null => {
+  try {
+    const raw = localStorage.getItem(CACHE_KEY);
+    if (!raw) return null;
+    const v = JSON.parse(raw) as UsageCacheShape;
+    return v && Array.isArray(v.matrix) && Array.isArray(v.accounts) ? v : null;
+  } catch {
+    return null;
+  }
+};
+const persistCache = (c: UsageCacheShape) => {
+  try {
+    localStorage.setItem(CACHE_KEY, JSON.stringify(c));
+  } catch {
+    /* 配额满/隐私模式忽略 */
+  }
+};
+let dataCache: UsageCacheShape | null = loadPersisted();
 
 /**
  * Usage 岛 —— 粒度 × 双栏布局：左 = 周期卡片（日历/周卡/月卡/年卡，点击切换统计周期），
@@ -256,6 +285,9 @@ export function UsagePage() {
   const [progress, setProgress] = useState<{ stage: string; done: number; total: number } | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // cc-switch 备份导入（另一台电脑用量并账）
+  const [importing, setImporting] = useState(false);
+  const [importMsg, setImportMsg] = useState<string | null>(null);
 
   // 采集进度事件
   useEffect(() => {
@@ -275,21 +307,19 @@ export function UsagePage() {
     };
   }, []);
 
-  const refresh = useCallback(async (force = true) => {
-    // 缓存有效期内直接复用（切页回来的挂载路径），不触发全量采集
-    if (!force && dataCache && Date.now() - dataCache.at < CACHE_TTL) {
-      setMatrix(dataCache.matrix);
-      setAccounts(dataCache.accounts);
-      setSlotLabels(dataCache.slotLabels);
-      return;
-    }
+  const applyCache = useCallback((c: UsageCacheShape) => {
+    setMatrix(c.matrix);
+    setAccounts(c.accounts);
+    setSlotLabels(c.slotLabels);
+  }, []);
+
+  /** 查库刷新（matrix/accounts 现在读预聚合与账本，毫秒级）；withCollect = 手动刷新才触发采集 */
+  const loadFromDb = useCallback(async (withCollect: boolean) => {
     setRefreshing(true);
     setError(null);
     try {
-      await usageCollect();
+      if (withCollect) await usageCollect();
       const [mx, ac] = await Promise.all([usageMatrix(), usageAccounts()]);
-      setMatrix(mx);
-      setAccounts(ac);
       // WB 槽位 label 用于账户 chip 文案（uid → label；失败降级 uid 前缀）
       const labels: Record<string, string> = {};
       try {
@@ -298,8 +328,11 @@ export function UsagePage() {
       } catch {
         /* label 拿不到就降级 uid 前缀，不阻塞主流程 */
       }
+      setMatrix(mx);
+      setAccounts(ac);
       setSlotLabels(labels);
       dataCache = { at: Date.now(), matrix: mx, accounts: ac, slotLabels: labels };
+      persistCache(dataCache);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -307,15 +340,76 @@ export function UsagePage() {
     }
   }, []);
 
-  // 挂载：优先吃缓存（有效期内零采集），过期才全量
+  const refresh = useCallback(
+    async (force = false) => {
+      // 先渲染缓存（内存 → localStorage），页面立即完整显示，再查库静默更新
+      if (dataCache) applyCache(dataCache);
+      await loadFromDb(force);
+    },
+    [applyCache, loadFromDb],
+  );
+
+  /** 导入 cc-switch SQL 备份（另一台电脑的用量并账）。
+   *  request_id 带 ccs: / ccs-roll: 前缀幂等去重，已导入过的部分自动跳过，重选同一文件安全。 */
+  const importCcswitch = useCallback(async () => {
+    let picked: string | null;
+    try {
+      picked = await openFileDialog({
+        multiple: false,
+        directory: false,
+        title: '选择 cc-switch 导出的 SQL 备份',
+        filters: [{ name: 'cc-switch SQL 备份', extensions: ['sql', 'db', 'sqlite'] }],
+      });
+    } catch (e) {
+      setError(`打开文件对话框失败：${String(e)}`);
+      return;
+    }
+    if (!picked || typeof picked !== 'string') return; // 用户取消
+    setImporting(true);
+    setImportMsg(null);
+    setError(null);
+    try {
+      const r: CcsImportReport = await usageImportCcswitch(picked);
+      const newTotal = r.detail_new + r.rollup_new;
+      const fileTotal = r.detail_total + r.rollup_total;
+      const skipped = fileTotal - newTotal;
+      if (newTotal > 0) {
+        const parts = [
+          r.detail_new > 0 ? `明细 ${r.detail_new} 条` : null,
+          r.rollup_new > 0 ? `日汇总合成 ${r.rollup_new} 条` : null,
+        ].filter(Boolean);
+        setImportMsg(`导入完成：新增 ${parts.join(' + ')}${skipped > 0 ? `，跳过已导入 ${skipped} 条` : ''}`);
+      } else {
+        setImportMsg(`没有新数据：文件内 ${fileTotal} 条均已导入过，已跳过`);
+      }
+      // 导入的旧数据不在增量采集游标里，清掉缓存强制全量重查
+      dataCache = null;
+      localStorage.removeItem(CACHE_KEY);
+      await loadFromDb(false);
+    } catch (e) {
+      setImportMsg(null);
+      setError(`cc-switch 备份导入失败：${String(e)}`);
+    } finally {
+      setImporting(false);
+    }
+  }, [loadFromDb]);
+
+  // 挂载：先渲染缓存立即出完整页面，再查库更新（不触发采集）
   useEffect(() => {
     void refresh(false);
   }, [refresh]);
 
-  // 页面停留期间 5min 轮询，保持数据新鲜（同时给缓存续期）
+  // 5min 轮询 + 可见性感知：窗口隐藏（关到托盘）暂停轮询，恢复可见立即刷新
   useEffect(() => {
-    const t = setInterval(() => void refresh(true), CACHE_TTL);
-    return () => clearInterval(t);
+    const tick = () => {
+      if (!document.hidden) void refresh(false);
+    };
+    const t = setInterval(tick, CACHE_TTL);
+    document.addEventListener('visibilitychange', tick);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener('visibilitychange', tick);
+    };
   }, [refresh]);
 
   // 当前上下文的 overview range（KPI 合计口径）
@@ -629,8 +723,26 @@ export function UsagePage() {
           </>
         )}
         <span style={{ flex: 1 }} />
+        {importMsg && (
+          <span
+            className="chip off"
+            style={{ fontSize: 11, maxWidth: 420, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+            title={importMsg}
+          >
+            {importMsg}
+          </span>
+        )}
+        {importing && <span className="chip warn">导入解析中…</span>}
+        <button
+          className="btn gh"
+          onClick={() => void importCcswitch()}
+          disabled={importing || refreshing}
+          title="导入 cc-switch 导出的 SQL 备份（另一台电脑的用量并账；已导入过的数据自动跳过）"
+        >
+          ⤓ 导入
+        </button>
         {refreshing && <span className="chip warn">采集中…</span>}
-        <button className="btn gh" onClick={() => void refresh()} disabled={refreshing}>
+        <button className="btn gh" onClick={() => void refresh(true)} disabled={refreshing}>
           <span className={refreshing ? 'spinning' : ''} style={{ display: 'inline-block' }}>↻</span> 刷新
         </button>
       </div>
