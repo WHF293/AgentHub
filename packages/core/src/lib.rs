@@ -14,6 +14,7 @@ pub mod migrate;
 pub mod modelfetch;
 pub mod plugins;
 pub mod store;
+pub mod unbind;
 pub mod update;
 pub mod usage;
 

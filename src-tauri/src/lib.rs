@@ -76,11 +76,15 @@ pub fn run() {
 
             // 后台常驻采集线程：启动即全量+增量，之后每 60s 一次增量巡检
             // （增量续扫修复后毫秒级，不依赖页面打开；独立 WAL 连接，不与 UI 抢锁。
-            //  数据常新后，前端 Usage 页只需查库，不再主动触发采集）
-            let handle = app.handle().clone();
+            //  数据常新后，前端 Usage 页只需查库，不再主动触发采集。
+            //  已解绑（app_settings.unbound=1）时跳过采集，线程空转保活，重新接管后自动恢复）
+            //  传 None：后台巡检不向 UI 发进度事件（进度条只对手动「刷新」出现，
+            //  否则每 60s 弹一次 ZCode 全量账本扫描进度，纯打扰）
             std::thread::spawn(move || loop {
                 if let Ok(s2) = store::Store::open() {
-                    let _ = usage::collect_all(&s2, Some(&handle));
+                    if !unbind::is_unbound(&s2) {
+                        let _ = usage::collect_all(&s2, None);
+                    }
                 }
                 std::thread::sleep(std::time::Duration::from_secs(60));
             });
@@ -191,6 +195,10 @@ pub fn run() {
             agenthub_core::memory::project_init,
             agenthub_core::memory::project_sync,
             agenthub_core::memory::project_consolidate,
+            // 解绑域（Setting 岛「解绑与卸载」卡片）
+            agenthub_core::unbind::unbind_status,
+            agenthub_core::unbind::unbind_run,
+            agenthub_core::unbind::unbind_reclaim,
             agenthub_core::update::update_check,
             agenthub_core::update::update_install,
             agenthub_core::update::update_proxy_get,

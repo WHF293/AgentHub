@@ -126,6 +126,37 @@ impl AgentAdapter for ClaudeAdapter {
                 .unwrap_or(false)
     }
 
+    /// 解绑：整目录链还原 + settings.json 清理 AgentHub 写入的 modelOptions
+    fn unbind(&self, _store: &Store, opts: &agenthub_core::adapters::UnbindOpts) -> Res<Vec<String>> {
+        let central = agenthub_core::store::central_skills_dir();
+        let action = agenthub_core::unbind::unlink_restore_dir(
+            &skills_dir(),
+            &central,
+            &agenthub_core::store::backups_dir(),
+            &opts.archive_dir,
+        )?;
+        let mut steps = vec![format!("Claude skills 整目录链：{action}")];
+        // settings.json 顶层 modelOptions：AgentHub 写入的可选模型清单（运行不依赖），
+        // 模型 env 四键为自包含配置保留不动
+        let p = settings_json();
+        if p.is_file() {
+            if let Some(bytes) = fsutil::read_opt(&p) {
+                if let Ok(mut v) = serde_json::from_slice::<Value>(&bytes) {
+                    if v.get("modelOptions").is_some() {
+                        fsutil::backup_file(&p, &opts.archive_dir)?;
+                        if let Some(obj) = v.as_object_mut() {
+                            obj.remove("modelOptions");
+                        }
+                        let out = serde_json::to_vec_pretty(&v).map_err(|e| e.to_string())?;
+                        fsutil::atomic_write(&p, &out)?;
+                        steps.push("✓ settings.json 已移除 AgentHub 写入的 modelOptions（模型 env 保留）".into());
+                    }
+                }
+            }
+        }
+        Ok(steps)
+    }
+
     fn mcp_config(&self) -> McpConfig {
         McpConfig { path: claude_json(), container: &["mcpServers"] }
     }

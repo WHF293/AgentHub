@@ -224,6 +224,18 @@ impl AgentAdapter for WorkBuddyAdapter {
         Ok(format!("逐项链 {relinked}/{total}"))
     }
 
+    /// 解绑：逐项链还原 —— skills_dir 下每个指向中央仓库的链接删链并还原独立实体
+    fn unbind(&self, _store: &Store, opts: &agenthub_core::adapters::UnbindOpts) -> Res<Vec<String>> {
+        let central = agenthub_core::store::central_skills_dir();
+        let steps = agenthub_core::unbind::unlink_restore_per_skill(
+            &skills_dir(),
+            &central,
+            &agenthub_core::store::backups_dir(),
+            &opts.archive_dir,
+        )?;
+        Ok(vec![format!("WB skills 逐项链：{}", steps.join("；"))])
+    }
+
     fn skill_link_status(&self, name: &str, central: &Path) -> String {
         link_status_for(&skills_dir().join(name), central)
     }

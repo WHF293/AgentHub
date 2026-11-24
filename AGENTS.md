@@ -126,8 +126,9 @@ src-tauri/              agenthub 壳：tauri 窗口/托盘/单实例/自启 + PL
    usage 日志只取 usage/元数据字段，request.messages / response.text 正文永不入库；
    API Key 只存 ZCode 目标文件、不落 AgentHub 库。
 5. **用量数据源（实测定版，勿回退）**：
-   - ZCode：`~/.zcode/cli/db/db.sqlite` 的 `model_usage` 表全表扫描（SUM(input)=18.87 亿 ≈
-     官方 18.9 亿；request_id = 主键 id 幂等去重）。rollout jsonl 只剩近期文件，已废弃，
+   - ZCode：`~/.zcode/cli/db/db.sqlite` 的 `model_usage` 表（SUM(input)=18.87 亿 ≈
+     官方 18.9 亿；request_id = 主键 id 幂等去重）。**行数游标快检**（append-only 账本，
+     `usage_cursor` 记行数，行数不变零成本跳过，变化才全表重扫）。rollout jsonl 已废弃，
      历史事件已一次性清除
    - WB：`~/.workbuddy/projects/**/*.jsonl` 的 `providerData.rawUsage/usage`（请求级真实 usage；
      rawUsage.credit = 官方积分，与账单同源；prompt_tokens 含缓存命中 → input = prompt − 命中）
@@ -136,8 +137,9 @@ src-tauri/              agenthub 壳：tauri 窗口/托盘/单实例/自启 + PL
      采集动辄 20s+，2026-11-24 性能定版）
 6. **采集不卡 UI**：usage 命令全部 async + 分批短锁（400 条/批）+ `usage-collect-progress`
    事件推前端进度条（emit_progress 节流：百分比变化且间隔 ≥300ms 才发）+ COLLECTING 原子互斥防重入；
-   应用启动即后台常驻线程独立 WAL 连接采集（启动全量一次，之后每 60s 增量巡检，不依赖页面打开）；
-   历史永久留存 `~/.agenthub/agenthub.db`，卸载双 Agent 后仍可查
+   应用启动即后台常驻线程独立 WAL 连接采集（启动全量一次，之后每 60s 增量巡检，不依赖页面
+   打开；**后台巡检传 app=None 静默** —— 进度事件只对手动「刷新」出现，否则每 60s 弹进度条
+   纯打扰）；历史永久留存 `~/.agenthub/agenthub.db`，卸载双 Agent 后仍可查
 6.5. **IPC 命令一律 async（硬性）**：sync 命令在主线程执行，内部任何阻塞 IO/子进程
    （tasklist / 文件扫描 / DB）都会冻结窗口消息泵 →「未响应」假死。全部 `#[tauri::command]`
    用 `pub async fn`（非 Result 返回也要包 Result）；长阻塞（usage_collect / checkin / 网络）

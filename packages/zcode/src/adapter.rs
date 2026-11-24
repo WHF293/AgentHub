@@ -136,6 +136,18 @@ impl AgentAdapter for ZcodeAdapter {
                 .unwrap_or(false)
     }
 
+    /// 解绑：整目录链还原 —— 删 ~/.zcode/skills 整链并还原原目录
+    fn unbind(&self, _store: &Store, opts: &agenthub_core::adapters::UnbindOpts) -> Res<Vec<String>> {
+        let central = agenthub_core::store::central_skills_dir();
+        let action = agenthub_core::unbind::unlink_restore_dir(
+            &skills_dir(),
+            &central,
+            &agenthub_core::store::backups_dir(),
+            &opts.archive_dir,
+        )?;
+        Ok(vec![format!("ZCode skills 整目录链：{action}")])
+    }
+
     fn mcp_config(&self) -> McpConfig {
         McpConfig { path: cli_config(), container: &["mcp", "servers"] }
     }

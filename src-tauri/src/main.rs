@@ -333,5 +333,24 @@ fn main() {
         }
         return;
     }
+    // 无头模式：agenthub.exe --unbind  解绑全部 Agent（NSIS 卸载钩子 / 脚本用）
+    // 消除各 Agent 对 ~/.agenthub 的运行时依赖（skills 链还原 / 记忆 symlink 还原 / 桥接块清理），
+    // 幂等可重跑；此后卸载 AgentHub 不会导致各 Agent 技能、记忆异常
+    if args.iter().any(|a| a == "--unbind") {
+        let store = agenthub_lib::store::Store::open().expect("初始化 ~/.agenthub 失败");
+        match agenthub_lib::unbind::unbind_all(&store) {
+            Ok(r) => {
+                println!("{}", serde_json::to_string_pretty(&r).expect("serialize"));
+                if r.failed > 0 {
+                    std::process::exit(2); // 有失败项（卸载流程继续，链接残留可重跑修复）
+                }
+            }
+            Err(e) => {
+                eprintln!("解绑失败: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     agenthub_lib::run()
 }

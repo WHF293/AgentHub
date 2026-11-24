@@ -683,3 +683,18 @@ export const projectInit = (path: string) => invoke<string[]>('project_init', { 
 export const projectSync = (path: string) => invoke<string[]>('project_sync', { path });
 export const projectConsolidate = (path: string) =>
   invoke<string[]>('project_consolidate', { path });
+
+// ─── 解绑域（Setting 岛「解绑与卸载」卡片） ───
+
+export interface UnbindReport {
+  steps: string[];
+  failed: number;
+  backup_dir: string;
+  /** 已处于解绑状态（幂等跳过） */
+  already_unbound: boolean;
+}
+
+export const unbindStatus = () => invoke<boolean>('unbind_status');
+export const unbindRun = () => invoke<UnbindReport>('unbind_run');
+/** 重新接管：清解绑标志 → skills 迁移 → MCP 同步 → 全局记忆统一 */
+export const unbindReclaim = () => invoke<string[]>('unbind_reclaim');

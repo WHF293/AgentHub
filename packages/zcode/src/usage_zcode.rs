@@ -3,19 +3,29 @@
 //! 实测（2026-10-31）：rollout jsonl 只保留近期 3 个会话文件；完整账本在
 //! ~/.zcode/cli/db/db.sqlite 的 model_usage 表（含 input/output/reasoning/cache 拆分、
 //! completed_at、model/provider），SUM(input_tokens)=18.87 亿 与官方「累计 Token 18.9 亿」吻合。
-//! 全表扫描 + request_id(=model_usage.id) 幂等去重，无需游标。
+//! 行数游标快检 + 全表扫描 + request_id(=model_usage.id) 幂等去重：
+//! model_usage 是 append-only 账本，行数不变 = 无新数据（60s 巡检零成本跳过）；
+//! 行数变化才全表重扫，INSERT OR IGNORE 只落新增。
+
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use rusqlite::OpenFlags;
 use tauri::AppHandle;
 
 use agenthub_core::fsutil::Res;
 use agenthub_core::store::Store;
-use agenthub_core::usage::{emit_progress, ts_to_local};
+use agenthub_core::usage::{cursor_get, cursor_set, emit_progress, ts_to_local};
 
 use crate::adapter;
 
-/// 一次性清理：旧 rollout 来源被 model_usage 全量账本取代（request_id 体系不同，不清会双计）
+/// 一次性清理：旧 rollout 来源被 model_usage 全量账本取代（request_id 体系不同，不清会双计）。
+/// Once 守卫 —— 历史遗留数据首轮清完就不再跑（否则每 60s 巡检都对 usage_events 全表 DELETE 扫描）
+static CLEAN_DONE: AtomicBool = AtomicBool::new(false);
+
 fn cleanup_legacy(store: &Store) -> agenthub_core::fsutil::Res<()> {
+    if CLEAN_DONE.load(Ordering::Relaxed) {
+        return Ok(());
+    }
     store.with(|conn| {
         conn.execute(
             "DELETE FROM usage_events WHERE agent = 'zcode' AND source = 'rollout'",
@@ -23,8 +33,14 @@ fn cleanup_legacy(store: &Store) -> agenthub_core::fsutil::Res<()> {
         )
         .map_err(|e| e.to_string())?;
         Ok(())
-    })
+    })?;
+    // 成功才置位（失败下次巡检重试，避免遗留 rollout 数据双计）
+    CLEAN_DONE.store(true, Ordering::Relaxed);
+    Ok(())
 }
+
+/// 行数游标键：model_usage 是 append-only 账本，行数不变 = 无新数据，跳过全表扫描
+const COUNT_CURSOR_KEY: &str = "zcode:model_usage";
 
 fn collect_zcode(store: &Store, app: Option<&AppHandle>) -> Res<usize> {
     let db = adapter::dir().join("cli").join("db").join("db.sqlite");
@@ -33,6 +49,16 @@ fn collect_zcode(store: &Store, app: Option<&AppHandle>) -> Res<usize> {
     }
     let conn = rusqlite::Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|e| format!("只读打开 zcode db.sqlite 失败: {e}"))?;
+
+    // 行数游标快检：append-only 账本行数不变 = 无新数据，直接返回（60s 巡检零成本）。
+    // 行数变化才进全表扫描，靠 request_id(=id) 幂等去重只落新增。
+    let row_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM model_usage", [], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    let (last_count, _) = cursor_get(store, COUNT_CURSOR_KEY)?;
+    if row_count == last_count && last_count > 0 {
+        return Ok(0);
+    }
 
     let mut stmt = conn
         .prepare(
@@ -98,8 +124,11 @@ fn collect_zcode(store: &Store, app: Option<&AppHandle>) -> Res<usize> {
             }
             Ok(n)
         })?;
-        emit_progress(app, "zcode", (bi + 1) * 400.min(total), total);
+        // 修优先级 bug：原 (bi+1) * 400.min(total) 在 total<400*批数 时 done 会超过 total
+        emit_progress(app, "zcode", ((bi + 1) * 400).min(total), total);
     }
+    // 扫描成功才推进行数游标（失败下次重扫，幂等去重兜底）
+    cursor_set(store, "model-usage", COUNT_CURSOR_KEY, row_count, 0)?;
     Ok(inserted)
 }
 

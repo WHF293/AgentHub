@@ -73,9 +73,38 @@ pub fn link_status_for(entry_path: &Path, central_skill: &Path) -> String {
     }
 }
 
-/// 路径相等（大小写与分隔符不敏感，Windows 语义）
+/// 路径相等（大小写与分隔符不敏感，Windows 语义）。
+/// 加固：折叠连续分隔符（C://a → C:\a），保留 UNC 前缀 \\server\share；
+/// 沙盒/重定向环境（USERPROFILE 含正斜杠或重复分隔符）下链接比对不误判。
 pub fn eq_path(a: &str, b: &str) -> bool {
-    a.replace('/', "\\").to_lowercase() == b.replace('/', "\\").to_lowercase()
+    fn norm(s: &str) -> String {
+        let s = s.replace('/', "\\");
+        let mut out = String::with_capacity(s.len());
+        let mut prev_sep = false;
+        for (i, c) in s.chars().enumerate() {
+            if c == '\\' {
+                // 仅保留 UNC 开头的 \\（i==1），其余连续分隔符折叠
+                if prev_sep && i != 1 {
+                    continue;
+                }
+                prev_sep = true;
+            } else {
+                prev_sep = false;
+            }
+            out.push(c);
+        }
+        out.to_lowercase()
+    }
+    norm(a) == norm(b)
+}
+
+// ─── 解绑域（core unbind 引擎经此分发；无接管内容的端默认无动作） ───
+
+/// 解绑选项
+#[derive(Debug, Clone)]
+pub struct UnbindOpts {
+    /// 本次解绑的归档目录 backups/unbind-<stamp>/（被替换内容先归档到此处）
+    pub archive_dir: PathBuf,
 }
 
 // ─── MCP 域中性结构（避免 adapters 反向依赖 mcp.rs） ───
@@ -218,6 +247,14 @@ pub trait AgentAdapter: Sync + Send {
     /// 项目指令文件：(文件名, agent id)，如 ("AGENTS.md", "zcode")；无则 None
     fn instruction_file(&self) -> Option<(&'static str, &'static str)> {
         None
+    }
+
+    // ── 解绑域（core unbind 引擎分发；无接管内容的端默认无动作） ──
+
+    /// 解绑本端：移除指向中央仓库的链接并还原各 Agent 独立实体。
+    /// 返回可展示步骤日志（"名字: 动作"）；默认无动作（无 skills 域的端零改动）。
+    fn unbind(&self, _store: &Store, _opts: &UnbindOpts) -> Res<Vec<String>> {
+        Ok(Vec::new())
     }
 
     // ── 账号/登录态探测（Account 岛健康卡用；无登录态概念的端返回 false） ──

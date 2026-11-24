@@ -226,6 +226,15 @@ impl Store {
                  );",
             )
             .map_err(|e| format!("usage_daily 建表失败: {e}"))?;
+            // v2.3：app_settings kv 表（unbound 解绑标志等轻量全局设置）
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS app_settings (
+                   key TEXT PRIMARY KEY,
+                   value TEXT,
+                   updated_at TEXT
+                 );",
+            )
+            .map_err(|e| format!("app_settings 建表失败: {e}"))?;
             // 内置双市场（WB 市场为占位：接口探测未果前降级本地扫描）
             conn.execute(
                 "INSERT OR IGNORE INTO skill_sources(id, name, type, url, enabled) VALUES
@@ -244,6 +253,31 @@ pub fn log_op(conn: &Connection, action: &str, target: &str, detail: serde_json:
         "INSERT INTO op_log(action, target, detail_json, created_at) VALUES (?1, ?2, ?3, datetime('now','localtime'))",
         rusqlite::params![action, target, detail.to_string()],
     );
+}
+
+// ─── app_settings kv（v2.3：unbound 解绑标志等轻量全局设置） ───
+
+pub fn setting_get(conn: &Connection, key: &str) -> Res<Option<String>> {
+    conn.query_row(
+        "SELECT value FROM app_settings WHERE key = ?1",
+        rusqlite::params![key],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .map_err(|e| e.to_string())
+}
+
+pub fn setting_get_store(store: &Store, key: &str) -> Res<Option<String>> {
+    store.with(|conn| setting_get(conn, key))
+}
+
+pub fn setting_set(conn: &Connection, key: &str, value: &str) -> Res<()> {
+    conn.execute(
+        "INSERT INTO app_settings(key, value, updated_at) VALUES (?1, ?2, datetime('now','localtime'))
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        rusqlite::params![key, value],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 // ─── WB models.json 托管清单（M4 双端写穿） ───

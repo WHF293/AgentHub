@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { enable as autostartEnable, disable as autostartDisable, isEnabled as autostartIsEnabled } from '@tauri-apps/plugin-autostart';
 import { invoke } from '@tauri-apps/api/core';
-import { recentOpLog, updateProxyGet, updateProxySet, type OpLogRow } from '../api';
+import { recentOpLog, updateProxyGet, updateProxySet, unbindStatus, unbindRun, unbindReclaim, type OpLogRow, type UnbindReport } from '../api';
 import { getDefaultPage, setDefaultPage, type DefaultPage } from '../stores/nav';
 import { PageHeader } from '../common/components/PageHeader';
 import { useThemeStore, type ThemeMode } from '../stores/theme';
@@ -21,11 +21,20 @@ export function SettingsPage() {
   const [proxyUrl, setProxyUrl] = useState('');
   const [proxySaved, setProxySaved] = useState('');
   const [savingProxy, setSavingProxy] = useState(false);
+  // 解绑与卸载：状态探测 / 二次确认 / 执行中 / 报告
+  const [unbound, setUnbound] = useState<boolean | null>(null);
+  const [confirmUnbind, setConfirmUnbind] = useState(false);
+  const [unbinding, setUnbinding] = useState(false);
+  const [unbindReport, setUnbindReport] = useState<UnbindReport | null>(null);
+  const [reclaiming, setReclaiming] = useState(false);
 
   useEffect(() => {
     void recentOpLog(10)
       .then(setOps)
       .catch(() => {});
+    void unbindStatus()
+      .then(setUnbound)
+      .catch(() => setUnbound(false));
     void updateProxyGet()
       .then((u) => {
         // 未配置时预填默认本地代理（默认 127.0.0.1:7897，可随意改；清空保存 = 恢复直连）
@@ -86,6 +95,42 @@ export function SettingsPage() {
     ['light', '浅色'],
     ['dark', '深色'],
   ];
+
+  /** 执行解绑（二次确认后）：恢复各 Agent 独立配置，移除指向 ~/.agenthub 的链接 */
+  const doUnbind = useCallback(async () => {
+    setUnbinding(true);
+    try {
+      const r = await unbindRun();
+      setUnbindReport(r);
+      setUnbound(true);
+      setConfirmUnbind(false);
+      toast(r.failed > 0 ? '解绑完成，但有失败项（详情见报告）' : '解绑完成，各 Agent 已恢复独立配置');
+    } catch (e) {
+      toast(String(e).replace(/^.*?"|".*$/g, '') || '解绑失败', 'err');
+    } finally {
+      setUnbinding(false);
+    }
+  }, []);
+
+  /** 重新接管：清解绑标志 → skills 迁移 → MCP 同步 → 全局记忆统一（全部幂等） */
+  const doReclaim = useCallback(async () => {
+    setReclaiming(true);
+    try {
+      const steps = await unbindReclaim();
+      setUnbound(false);
+      setUnbindReport({
+        steps,
+        failed: 0,
+        backup_dir: '',
+        already_unbound: false,
+      });
+      toast('重新接管完成，链接已重建');
+    } catch (e) {
+      toast(String(e).replace(/^.*?"|".*$/g, '') || '重新接管失败', 'err');
+    } finally {
+      setReclaiming(false);
+    }
+  }, []);
 
   return (
     <div>
@@ -198,6 +243,65 @@ export function SettingsPage() {
           </div>
           <span className={`chip ${proxySaved ? 'ok' : 'off'}`}>
             {proxySaved ? '走代理' : '直连'}
+          </span>
+        </div>
+        <div className="li">
+          <div className="ic">⛓</div>
+          <div className="grow">
+            <div className="nm">解除绑定（卸载 AgentHub 前使用）</div>
+            <div className="ds">
+              把 Skills / 全局记忆还原为各 Agent 独立配置，移除指向 ~/.agenthub 的链接，卸载本应用后
+              WorkBuddy / ZCode / Claude Code 不会再出现技能、记忆异常；MCP / 模型配置自包含，保留现状仅停止同步。
+              ~/.agenthub 数据（用量历史、备份）全部保留。
+            </div>
+            {unbindReport && (
+              <div
+                style={{
+                  marginTop: 6,
+                  padding: '6px 10px',
+                  borderRadius: 9,
+                  background: 'var(--color-surface)',
+                  border: '1px solid var(--color-border)',
+                  fontSize: 11.5,
+                  color: 'var(--color-text-2)',
+                  lineHeight: 1.7,
+                  maxHeight: 180,
+                  overflow: 'auto',
+                }}
+              >
+                {unbindReport.steps.map((s, i) => (
+                  <div key={i}>{s}</div>
+                ))}
+                {unbindReport.backup_dir && (
+                  <div style={{ color: 'var(--color-text-3)' }}>归档：{unbindReport.backup_dir}</div>
+                )}
+              </div>
+            )}
+            {confirmUnbind ? (
+              <div className="flex" style={{ gap: 6, marginTop: 6 }}>
+                <button className="btn" disabled={unbinding} onClick={() => void doUnbind()}>
+                  {unbinding ? '解绑中…（秒级，请勿关闭）' : '确认解绑：还原各 Agent 独立配置'}
+                </button>
+                <button className="btn gh" disabled={unbinding} onClick={() => setConfirmUnbind(false)}>
+                  取消
+                </button>
+              </div>
+            ) : unbound ? (
+              <div className="flex" style={{ gap: 6, marginTop: 6 }}>
+                <button className="btn gh" disabled={reclaiming} onClick={() => void doReclaim()}>
+                  {reclaiming ? '接管中…' : '重新接管'}
+                </button>
+              </div>
+            ) : (
+              <div className="flex" style={{ gap: 6, marginTop: 6 }}>
+                <button className="btn gh" disabled={unbinding || unbound === null} onClick={() => setConfirmUnbind(true)}>
+                  解除绑定
+                </button>
+              </div>
+            )}
+          </div>
+          <span className={`chip ${unbound ? 'ok' : 'off'}`}>
+            {unbound === null ? '…' : unbound ? '已解绑' : '已接管'}
           </span>
         </div>
         <div className="li">
