@@ -25,14 +25,19 @@ Skills / MCP / 第三方模型 / 多账号 / Memory / 用量分析一站式管�
 
 ## AI 记忆统一存放（硬性）
 
-本项目记忆统一走 `.ai/`：主题层（`开发方案/`）+ 日志层（`memory/YYYY-MM-DD.md` 按日追加）。
-`.ai/` 与 `local_docs/` 已 gitignore，仅本地保存。各 agent 会话结束时把做了什么/为什么追加进
-`.ai/memory/<当日>.md`（这是 AgentHub 自身桥接机制的第一个样板项目）。
+本项目记忆统一走 `.ai/`：主题层（`开发方案/`）+ 记忆层（`memory/` 按主题归档）。
+`.ai/` 与 `local_docs/` 已 gitignore，仅本地保存。各 agent 会话结束时把做了什么/为什么记入
+`.ai/memory/YYYY-MM-DD-memoryTitle.md`（如 `2026-11-26-antd组件库踩坑记录.md`，同一主题追加进
+已有文件），每条记录标注记录人与时间（`- [YYYY-MM-DD HH:MM @agent名] ...`）。
+这是 AgentHub 自身桥接机制的第一个样板项目。
 
 <!-- agent-hub:start -->
 本项目所有 AI agent 共享记忆位于 `.ai/`：
-- 开始任务前，先读 `.ai/MEMORY.md` 和最近几天的 `.ai/memory/` 日志
-- 完成实质工作后，把做了什么/为什么追加到 `.ai/memory/YYYY-MM-DD.md`
+- 开始任务前，先读 `.ai/MEMORY.md` 和 `.ai/memory/` 下与任务相关的记忆文件
+- 完成实质工作后，记入 `.ai/memory/`（按主题归档，同一主题追加进已有文件，不要按日期重复建文件）：
+  - 文件名规范：`YYYY-MM-DD-memoryTitle.md`，如 `2026-11-26-antd组件库踩坑记录.md`
+  - 同一文件可能被多个 agent 先后补充，每条记录必须标注记录人与时间：
+    格式 `- [YYYY-MM-DD HH:MM @agent名] 记录内容`，如 `- [2026-11-26 14:30 @claude] ...`
 - 稳定的项目约定写入 `.ai/PROJECT.md`
 <!-- agent-hub:end -->
 
@@ -173,7 +178,7 @@ src-tauri/              agenthub 壳：tauri 窗口/托盘/单实例/自启 + PL
    守卫 tag 必须在 main 分支历史上；windows-latest 构建 amd64 NSIS 安装包 → 生成带编号变更列表 →
    创建 Release 并上传 `AgentHub_v*_x64-setup.exe`（Release 说明含 SmartScreen 无签名提示话术）。
 
-## 踩坑备忘（摘要，详见 .ai/memory/2026-10-31.md）
+## 踩坑备忘（摘要，详见 .ai/memory/2026-10-31-AgentHub启动与迁移.md）
 
 - rusqlite `last_insert_rowid()` 在 ON CONFLICT UPDATE 路径不可靠 → upsert 后显式 SELECT。
 - SELECT 列与 `row.get` 索引一一对应（加列后全体 +1）。

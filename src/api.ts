@@ -673,8 +673,27 @@ export interface ProjectInfo {
   consolidate_candidates: number;
 }
 
+export interface MemoryListItem {
+  name: string;
+  path: string;
+  size: number;
+  updated: string;
+}
+
 export const memoryGlobalList = () => invoke<MemoryFile[]>('memory_global_list');
 export const memoryRead = (path: string) => invoke<string>('memory_read', { path });
+/** 用资源管理器打开本地路径（文件 → 定位选中；目录 → 直接打开） */
+export const revealPath = (path: string) => invoke<void>('reveal_path', { path });
+/** 导入项目（用户手动选择目录；v2.5 起项目注册表为纯手动制） */
+export const projectImport = (path: string) => invoke<string[]>('project_import', { path });
+/** 列出项目 .ai/memory/ 下的记忆文件 */
+export const memoryFilesList = (project: string) =>
+  invoke<MemoryListItem[]>('memory_files_list', { project });
+/** 删除记忆文件（先备份到 backups/memory/） */
+export const memoryFileDelete = (path: string) => invoke<string>('memory_file_delete', { path });
+/** 重命名记忆文件（自动补 .md 后缀；重名拒绝） */
+export const memoryFileRename = (path: string, name: string) =>
+  invoke<string>('memory_file_rename', { path, name });
 export const memoryWrite = (path: string, content: string, allowZcodeAgents: boolean) =>
   invoke<void>('memory_write', { input: { path, content, allow_zcode_agents: allowZcodeAgents } });
 export const memoryGlobalUnify = () => invoke<string[]>('memory_global_unify');

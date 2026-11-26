@@ -376,3 +376,42 @@ pub async fn set_close_to_tray(enabled: bool) -> Result<(), String> {
     crate::CLOSE_TO_TRAY.store(enabled, std::sync::atomic::Ordering::Relaxed);
     Ok(())
 }
+
+/// 用资源管理器打开本地路径：文件 → 定位到所在文件夹并选中该文件；目录 → 直接打开。
+/// （Memory 岛「打开文件夹」入口；raw_arg 绕过 std 引号转义，保证带空格路径可解析）
+#[tauri::command]
+pub async fn reveal_path(path: String) -> Result<(), String> {
+    let p = std::path::PathBuf::from(&path);
+    if !p.exists() {
+        return Err(format!("路径不存在：{path}"));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW：避免 explorer 启动瞬间闪控制台
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let target = if p.is_file() {
+            format!("/select,\"{}\"", p.display())
+        } else {
+            format!("\"{}\"", p.display())
+        };
+        std::process::Command::new("explorer.exe")
+            .raw_arg(target)
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|e| format!("打开资源管理器失败：{e}"))?;
+    }
+    #[cfg(not(windows))]
+    {
+        let dir = if p.is_file() {
+            p.parent().unwrap_or(&p).to_path_buf()
+        } else {
+            p.clone()
+        };
+        std::process::Command::new("xdg-open")
+            .arg(dir)
+            .spawn()
+            .map_err(|e| format!("打开文件管理器失败：{e}"))?;
+    }
+    Ok(())
+}

@@ -19,8 +19,11 @@ pub const BLOCK_START: &str = "<!-- agent-hub:start -->";
 pub const BLOCK_END: &str = "<!-- agent-hub:end -->";
 pub const BRIDGE_BLOCK: &str = "<!-- agent-hub:start -->
 本项目所有 AI agent 共享记忆位于 `.ai/`：
-- 开始任务前，先读 `.ai/MEMORY.md` 和最近几天的 `.ai/memory/` 日志
-- 完成实质工作后，把做了什么/为什么追加到 `.ai/memory/YYYY-MM-DD.md`
+- 开始任务前，先读 `.ai/MEMORY.md` 和 `.ai/memory/` 下与任务相关的记忆文件
+- 完成实质工作后，记入 `.ai/memory/`（按主题归档，同一主题追加进已有文件，不要按日期重复建文件）：
+  - 文件名规范：`YYYY-MM-DD-memoryTitle.md`，如 `2026-11-26-antd组件库踩坑记录.md`
+  - 同一文件可能被多个 agent 先后补充，每条记录必须标注记录人与时间：
+    格式 `- [YYYY-MM-DD HH:MM @agent名] 记录内容`，如 `- [2026-11-26 14:30 @claude] ...`
 - 稳定的项目约定写入 `.ai/PROJECT.md`
 <!-- agent-hub:end -->";
 
@@ -81,7 +84,112 @@ fn points_to(path: &Path, canonical: &Path) -> bool {
             .unwrap_or(false)
 }
 
-/// 全局记忆文件列表：hub 真身恒显；各端残留文件仅在该端插件启用时列出
+// ─── Agent 特定全局记忆（v0.7.7：<agent>-global-memory.md，避免跨 agent 上下文互扰） ───
+
+pub const AGENT_LINKS_START: &str = "<!-- agent-hub:agent-links:start -->";
+pub const AGENT_LINKS_END: &str = "<!-- agent-hub:agent-links:end -->";
+
+/// agent 特定记忆真身路径：~/.agenthub/<agent>-global-memory.md
+pub fn central_agent_memory_md(agent: &str) -> PathBuf {
+    store::hub_dir().join(format!("{agent}-global-memory.md"))
+}
+
+/// MEMORY.md 中的链接区（幂等标记块，unify/ensure 时 upsert）
+fn agent_links_block() -> String {
+    let mut lines = vec![
+        AGENT_LINKS_START.to_string(),
+        "## Agent 特定全局记忆（仅对应 agent 按需读取，勿随本文件整体注入上下文）".to_string(),
+        String::new(),
+    ];
+    for a in crate::adapters::registry() {
+        lines.push(format!(
+            "- {}：`~/.agenthub/{}-global-memory.md`",
+            a.display_name(),
+            a.id()
+        ));
+    }
+    lines.push(AGENT_LINKS_END.to_string());
+    lines.join("\n")
+}
+
+fn upsert_agent_links(content: &str) -> String {
+    let block = agent_links_block();
+    if let (Some(s), Some(e_rel)) = (content.find(AGENT_LINKS_START), content.find(AGENT_LINKS_END)) {
+        if e_rel >= s {
+            let mut out = String::new();
+            out.push_str(&content[..s]);
+            out.push_str(&block);
+            out.push_str(&content[e_rel + AGENT_LINKS_END.len()..]);
+            return out;
+        }
+    }
+    let mut out = content.to_string();
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push('\n');
+    out.push_str(&block);
+    out.push('\n');
+    out
+}
+
+fn agent_memory_stub(display_name: &str) -> String {
+    format!(
+        "# {display_name} 全局记忆（agent 特定）\n\n\
+         > 仅 {display_name} 需要读取的记忆放这里；跨 agent 通用记忆在 ~/.agenthub/MEMORY.md。\n\
+         > 由 AgentHub 创建于 {}。\n",
+        chrono::Local::now().format("%Y-%m-%d %H:%M")
+    )
+}
+
+/// 幂等落地 agent 特定记忆：为每个已启用插件创建缺失的 <agent>-global-memory.md，
+/// 并向真身 MEMORY.md upsert 链接区（真身不存在则跳过链接区，unify 时会补）。
+pub fn ensure_agent_memory_files(store: &Store) -> Res<Vec<String>> {
+    let mut steps = Vec::new();
+    let enabled = crate::plugins::active_ids(store)?;
+    for a in crate::adapters::registry() {
+        if !enabled.iter().any(|id| id == a.id()) {
+            continue;
+        }
+        let p = central_agent_memory_md(a.id());
+        if !p.is_file() {
+            if let Some(par) = p.parent() {
+                std::fs::create_dir_all(par).map_err(|e| e.to_string())?;
+            }
+            fsutil::atomic_write(&p, agent_memory_stub(a.display_name()).as_bytes())?;
+            steps.push(format!("创建 {}-global-memory.md（{} 特定记忆真身）", a.id(), a.display_name()));
+        }
+    }
+    let canonical = store::central_memory_md();
+    if canonical.is_file() {
+        let content = std::fs::read_to_string(&canonical).unwrap_or_default();
+        let has_block =
+            content.contains(AGENT_LINKS_START) && content.contains(AGENT_LINKS_END);
+        let all_listed = crate::adapters::registry()
+            .iter()
+            .all(|a| content.contains(&format!("{}-global-memory.md", a.id())));
+        if !has_block || !all_listed {
+            let backup_dir = store::backups_dir().join("memory");
+            fsutil::backup_file(&canonical, &backup_dir).ok();
+            let new_content = upsert_agent_links(&content);
+            fsutil::atomic_write(&canonical, new_content.as_bytes())?;
+            steps.push("MEMORY.md 链接区已更新（agent 特定记忆入口）".into());
+        }
+    }
+    store.with(|conn| {
+        store::log_op(
+            conn,
+            "memory.agent_files_ensure",
+            "~/.agenthub",
+            serde_json::json!({ "steps": steps }),
+        );
+        Ok(())
+    })?;
+    Ok(steps)
+}
+
+/// 全局记忆文件列表：hub 真身恒显；agent 特定记忆（已启用插件）次之；
+/// 各端残留文件仅在该端插件启用时列出
 /// （目标清单由各插件经 AgentAdapter::memory_targets 提供，core 不感知具体路径）
 pub fn global_files(store: &Store) -> Vec<MemoryFile> {
     let enabled = crate::plugins::active_ids(store).unwrap_or_default();
@@ -98,6 +206,31 @@ pub fn global_files(store: &Store) -> Vec<MemoryFile> {
             false,
         ) {
             out.push(f);
+        }
+    }
+    // agent 特定记忆真身：<agent>-global-memory.md（缺失则幂等创建，页面加载即就绪）
+    if let Ok(_) = std::fs::metadata(store::hub_dir()) {
+        let _ = ensure_agent_memory_files(store);
+    }
+    for a in crate::adapters::registry() {
+        if !on(a.id()) {
+            continue;
+        }
+        let p = central_agent_memory_md(a.id());
+        if p.is_file() {
+            if let Some(f) = file_meta(
+                &p,
+                &format!("{}-agent-memory", a.id()),
+                &format!(
+                    "{} 全局记忆 · {}-global-memory.md（仅该 Agent 读取）",
+                    a.display_name(),
+                    a.id()
+                ),
+                a.id(),
+                false,
+            ) {
+                out.push(f);
+            }
         }
     }
     // 各端用户级记忆：已建链指向真身的不单列（就是真身本身），未统一的照旧列出便于发现残留
@@ -276,6 +409,11 @@ pub fn unify_global_memory(store: &Store) -> Res<Vec<String>> {
     } else {
         steps.push(format!("✓ 真身已存在，沿用：{}", canonical.display()));
     }
+    // agent 特定记忆：创建缺失的 <agent>-global-memory.md + 真身链接区 upsert
+    match ensure_agent_memory_files(store) {
+        Ok(agent_steps) => steps.extend(agent_steps.into_iter().map(|s| format!("✓ {s}"))),
+        Err(e) => steps.push(format!("⚠ agent 特定记忆落地失败：{e}")),
+    }
     // 目标：各启用端的用户级记忆路径（没有的也建链，获得统一记忆）
     let mut link_targets: Vec<(PathBuf, String)> = Vec::new();
     for (_, targets) in &targets_all {
@@ -372,40 +510,6 @@ fn project_name(path: &str) -> String {
         .unwrap_or_else(|| path.to_string())
 }
 
-fn ensure_projects_from_agents(store: &Store) -> Res<()> {
-    let mut paths: Vec<String> = Vec::new();
-    // 项目目录发现经各插件 discover_project_dirs 钩子提供（core 不感知具体端）
-    for a in crate::adapters::registry() {
-        paths.extend(a.discover_project_dirs());
-    }
-    // 归一化：canonicalize 消除正反斜杠差异；排除临时缓存 / 不存在目录
-    let mut normalized: Vec<String> = Vec::new();
-    for p in paths {
-        let pb = Path::new(&p);
-        if p.contains("workbuddy-cache") || p.contains("\\.cache\\") || p.contains("/.cache/") {
-            continue;
-        }
-        if !pb.is_dir() {
-            continue;
-        }
-        let canon = std::fs::canonicalize(pb).unwrap_or_else(|_| pb.to_path_buf());
-        let s = canon.to_string_lossy().to_string();
-        if !normalized.contains(&s) {
-            normalized.push(s);
-        }
-    }
-    store.with(|conn| {
-        for p in &normalized {
-            conn.execute(
-                "INSERT OR IGNORE INTO projects(path, name) VALUES (?1, ?2)",
-                rusqlite::params![p, project_name(p)],
-            )
-            .map_err(|e| e.to_string())?;
-        }
-        Ok(())
-    })
-}
-
 fn instruction_files(path: &Path) -> Vec<(String, PathBuf)> {
     let mut out = Vec::new();
     // 指令文件清单来自各插件 instruction_file 钩子（如 AGENTS.md→zcode、CLAUDE.md→claude）
@@ -442,8 +546,8 @@ fn upsert_block(content: &str) -> (String, bool) {
 }
 
 pub fn overview_projects(store: &Store) -> Res<Vec<ProjectInfo>> {
-    ensure_projects_from_agents(store)?;
-    // 注册表清理：删除缓存目录 / 已不存在的路径 / canonicalize 后重复的行
+    // 项目注册表为用户手动导入制（v2.4 起不再自动识别）；此处只做清理：
+    // 删除缓存目录 / 已不存在的路径 / canonicalize 后重复的行
     store.with(|conn| {
         let mut stmt = conn
             .prepare("SELECT id, path FROM projects")
@@ -563,11 +667,8 @@ pub fn init_project_bridge(store: &Store, path: &str) -> Res<Vec<String>> {
         std::fs::create_dir_all(&mem_dir).map_err(|e| e.to_string())?;
         steps.push("创建 .ai/memory/".into());
     }
-    let today = local_date();
-    let log = mem_dir.join(format!("{today}.md"));
-    if !log.is_file() {
-        fsutil::atomic_write(&log, format!("# {today}\n\n").as_bytes())?;
-    }
+    // 记忆文件按主题归档（YYYY-MM-DD-memoryTitle.md），由各 agent 首次记录时创建，
+    // init 不再预建按日命名的日志文件
 
     let project_id: i64 = store.with(|conn| {
         conn.execute(
@@ -751,8 +852,190 @@ pub fn consolidate_project_bridge(store: &Store, path: &str) -> Res<Vec<String>>
     Ok(steps)
 }
 
-fn local_date() -> String {
-    chrono::Local::now().format("%Y-%m-%d").to_string()
+// ─── 项目记忆文件管理（v2.5 用户导入制：import / list / delete / rename） ───
+
+#[derive(Debug, Serialize)]
+pub struct MemoryListItem {
+    /// 文件名（如 2026-11-26-antd组件库踩坑记录.md）
+    pub name: String,
+    pub path: String,
+    pub size: u64,
+    pub updated: String,
+}
+
+/// 项目的 .ai/memory 目录路径
+fn ai_memory_dir(project: &str) -> PathBuf {
+    Path::new(project).join(".ai").join("memory")
+}
+
+/// 路径守卫：必须是某个已注册项目 .ai/memory 目录下的直接子文件（防越权删改任意文件）
+fn ensure_in_ai_memory(store: &Store, path: &Path) -> Res<()> {
+    let target = std::fs::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .to_lowercase();
+    let ok = store
+        .with(|conn| {
+            let mut stmt = conn
+                .prepare("SELECT path FROM projects")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r.map_err(|e| e.to_string())?);
+            }
+            Ok(out)
+        })?
+        .into_iter()
+        .any(|proj| {
+            let dir = std::fs::canonicalize(ai_memory_dir(&proj))
+                .unwrap_or_else(|_| ai_memory_dir(&proj))
+                .to_string_lossy()
+                .to_lowercase();
+            target.starts_with(&format!("{dir}\\"))
+                || target.starts_with(&format!("{dir}/"))
+        });
+    if !ok {
+        return Err("路径不在任何已导入项目的 .ai/memory 目录内，拒绝操作".into());
+    }
+    Ok(())
+}
+
+/// 导入项目（用户手动选择目录注册；幂等，重复导入按 upsert 更新名称）
+pub fn import_project(store: &Store, path: &str) -> Res<Vec<String>> {
+    let root = Path::new(path);
+    if !root.is_dir() {
+        return Err(format!("目录不存在：{path}"));
+    }
+    let mut steps = Vec::new();
+    store.with(|conn| {
+        conn.execute(
+            "INSERT INTO projects(path, name) VALUES (?1, ?2)
+             ON CONFLICT(path) DO UPDATE SET name = excluded.name",
+            rusqlite::params![path, project_name(path)],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    })?;
+    steps.push(format!("已导入项目：{}", project_name(path)));
+    if ai_memory_dir(path).is_dir() {
+        steps.push("检测到 .ai/memory/，展开即可管理记忆文件".into());
+    } else {
+        steps.push("该项目暂无 .ai/memory/ —— 可先执行 init 创建 .ai/ 结构".into());
+    }
+    store.with(|conn| {
+        store::log_op(conn, "project.import", path, serde_json::json!({ "steps": steps }));
+        Ok(())
+    })?;
+    Ok(steps)
+}
+
+/// 列出项目 .ai/memory/ 下的全部 md 文件（按文件名排序）
+pub fn list_memory_files(store: &Store, project: &str) -> Res<Vec<MemoryListItem>> {
+    ensure_in_ai_memory_dir(store, project)?;
+    let dir = ai_memory_dir(project);
+    let mut items: Vec<MemoryListItem> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if !p.is_file() || p.extension().map(|x| x != "md").unwrap_or(true) {
+                continue;
+            }
+            let md = e.metadata().map_err(|e| e.to_string())?;
+            let updated = md
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .and_then(|d| {
+                    chrono::Local
+                        .timestamp_opt(d.as_secs() as i64, 0)
+                        .single()
+                        .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                })
+                .unwrap_or_default();
+            items.push(MemoryListItem {
+                name: p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+                path: p.to_string_lossy().to_string(),
+                size: md.len(),
+                updated,
+            });
+        }
+    }
+    items.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(items)
+}
+
+/// 项目目录必须已注册（列表入口守卫，与文件级守卫互补）
+fn ensure_in_ai_memory_dir(store: &Store, project: &str) -> Res<()> {
+    let registered = store.with(|conn| {
+        Ok(conn
+            .query_row(
+                "SELECT id FROM projects WHERE path = ?1",
+                rusqlite::params![project],
+                |row| row.get::<_, i64>(0),
+            )
+            .is_ok())
+    })?;
+    if !registered {
+        return Err("项目未导入（注册表无此目录）".into());
+    }
+    Ok(())
+}
+
+/// 删除 .ai/memory 下的记忆文件：先备份到 backups/memory/ 再移除（防误删可回滚）
+pub fn delete_memory_file(store: &Store, path: &str) -> Res<String> {
+    let p = Path::new(path);
+    if !p.is_file() {
+        return Err(format!("文件不存在：{path}"));
+    }
+    ensure_in_ai_memory(store, p)?;
+    let backup = fsutil::backup_file(p, &store::backups_dir().join("memory"))?;
+    std::fs::remove_file(p).map_err(|e| format!("删除失败: {e}"))?;
+    store.with(|conn| {
+        store::log_op(conn, "memory.file_delete", path, serde_json::json!({ "backup": backup.display().to_string() }));
+        Ok(())
+    })?;
+    Ok(backup.display().to_string())
+}
+
+/// 重命名 .ai/memory 下的记忆文件：同目录内改名，强制 .md 后缀，目标重名拒绝
+pub fn rename_memory_file(store: &Store, path: &str, name: &str) -> Res<String> {
+    let p = Path::new(path);
+    if !p.is_file() {
+        return Err(format!("文件不存在：{path}"));
+    }
+    ensure_in_ai_memory(store, p)?;
+    let name = name.trim().trim_end_matches(".md").to_string();
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+    {
+        return Err(format!("非法文件名：{name}"));
+    }
+    let new_path = p
+        .parent()
+        .ok_or_else(|| "无法定位父目录".to_string())?
+        .join(format!("{name}.md"));
+    if new_path.exists() {
+        return Err(format!("目标已存在：{}", new_path.display()));
+    }
+    std::fs::rename(p, &new_path).map_err(|e| format!("重命名失败: {e}"))?;
+    store.with(|conn| {
+        store::log_op(
+            conn,
+            "memory.file_rename",
+            path,
+            serde_json::json!({ "new": new_path.to_string_lossy() }),
+        );
+        Ok(())
+    })?;
+    Ok(new_path.to_string_lossy().to_string())
 }
 
 // ─── Tauri commands（M6） ───
@@ -797,6 +1080,30 @@ pub async fn project_sync(state: State<'_, Store>, path: String) -> Result<Vec<S
 #[tauri::command]
 pub async fn project_consolidate(state: State<'_, Store>, path: String) -> Result<Vec<String>, String> {
     consolidate_project_bridge(&state, &path)
+}
+
+/// 导入项目（用户手动选择目录；v2.5 起项目注册表为纯手动制）
+#[tauri::command]
+pub async fn project_import(state: State<'_, Store>, path: String) -> Result<Vec<String>, String> {
+    import_project(&state, &path)
+}
+
+/// 列出项目 .ai/memory/ 下的记忆文件
+#[tauri::command]
+pub async fn memory_files_list(state: State<'_, Store>, project: String) -> Result<Vec<MemoryListItem>, String> {
+    list_memory_files(&state, &project)
+}
+
+/// 删除记忆文件（先备份到 backups/memory/）
+#[tauri::command]
+pub async fn memory_file_delete(state: State<'_, Store>, path: String) -> Result<String, String> {
+    delete_memory_file(&state, &path)
+}
+
+/// 重命名记忆文件（同目录内；自动补 .md 后缀；重名拒绝）
+#[tauri::command]
+pub async fn memory_file_rename(state: State<'_, Store>, path: String, name: String) -> Result<String, String> {
+    rename_memory_file(&state, &path, &name)
 }
 
 /// 供路径校验单元测试使用

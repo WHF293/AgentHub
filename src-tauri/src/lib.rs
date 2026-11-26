@@ -195,6 +195,13 @@ pub fn run() {
             agenthub_core::memory::project_init,
             agenthub_core::memory::project_sync,
             agenthub_core::memory::project_consolidate,
+            // 项目记忆文件管理（v2.5 用户导入制）
+            agenthub_core::memory::project_import,
+            agenthub_core::memory::memory_files_list,
+            agenthub_core::memory::memory_file_delete,
+            agenthub_core::memory::memory_file_rename,
+            // 通用工具（Memory 岛「打开文件夹」等）
+            agenthub_core::commands::reveal_path,
             // 解绑域（Setting 岛「解绑与卸载」卡片）
             agenthub_core::unbind::unbind_status,
             agenthub_core::unbind::unbind_run,

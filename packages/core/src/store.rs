@@ -235,6 +235,28 @@ impl Store {
                  );",
             )
             .map_err(|e| format!("app_settings 建表失败: {e}"))?;
+            // v2.4：项目记忆改为用户手动导入制 —— 一次性清空旧自动识别的项目注册表
+            // （此前全部来自 ZCode recentProjects / WB 会话 cwd 自动发现，用户要求清空；
+            //  关联的 bridge_targets 孤儿行一并清理。此后仅 project_import 显式写入。
+            //  用 app_settings 打标保证只执行一次，否则每次启动都会清掉用户导入的项目）
+            let purged: Option<String> = conn
+                .query_row(
+                    "SELECT value FROM app_settings WHERE key = 'projects.purged'",
+                    [],
+                    |row| row.get(0),
+                )
+                .ok();
+            if purged.is_none() {
+                conn.execute_batch("DELETE FROM projects;
+                     DELETE FROM bridge_targets WHERE project_id NOT IN (SELECT id FROM projects);")
+                    .map_err(|e| format!("projects 清空迁移失败: {e}"))?;
+                conn.execute(
+                    "INSERT OR REPLACE INTO app_settings(key, value, updated_at)
+                     VALUES ('projects.purged', '1', datetime('now','localtime'))",
+                    [],
+                )
+                .map_err(|e| format!("projects 清空标记写入失败: {e}"))?;
+            }
             // 内置双市场（WB 市场为占位：接口探测未果前降级本地扫描）
             conn.execute(
                 "INSERT OR IGNORE INTO skill_sources(id, name, type, url, enabled) VALUES
