@@ -20,6 +20,7 @@ import {
 } from '../api';
 import { PageHeader } from '../common/components/PageHeader';
 import { LogoMark } from '../common/components/LogoMark';
+import { MarkdownView } from '../common/components/MarkdownView';
 import { toast } from '../stores/ui';
 
 const fmtSize = (n: number) => (n >= 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} B`);
@@ -222,26 +223,44 @@ function GlobalMemory() {
                 {error}
               </div>
             )}
-            <textarea
-              value={content}
-              readOnly={!editing}
-              onChange={(e) => setContent(e.target.value)}
-              spellCheck={false}
-              style={{
-                flex: 1,
-                minHeight: 340,
-                border: '1px solid var(--color-border)',
-                borderRadius: 12,
-                padding: 12,
-                background: 'var(--color-code-bg)',
-                fontFamily: 'Consolas, monospace',
-                fontSize: 11.5,
-                lineHeight: 1.8,
-                color: 'var(--color-text-2)',
-                resize: 'vertical',
-                outline: 'none',
-              }}
-            />
+            {editing ? (
+              <textarea
+                value={content}
+                autoFocus
+                onChange={(e) => setContent(e.target.value)}
+                spellCheck={false}
+                style={{
+                  flex: 1,
+                  minHeight: 340,
+                  border: '1px solid var(--color-border)',
+                  borderRadius: 12,
+                  padding: 12,
+                  background: 'var(--color-code-bg)',
+                  fontFamily: 'Consolas, monospace',
+                  fontSize: 11.5,
+                  lineHeight: 1.8,
+                  color: 'var(--color-text-2)',
+                  resize: 'vertical',
+                  outline: 'none',
+                }}
+              />
+            ) : (
+              <div
+                style={{
+                  flex: 1,
+                  minHeight: 340,
+                  maxHeight: 'calc(100vh - 260px)',
+                  overflowY: 'auto',
+                  overscrollBehavior: 'contain',
+                  border: '1px solid var(--color-border)',
+                  borderRadius: 12,
+                  padding: '6px 16px',
+                  background: 'var(--color-surface)',
+                }}
+              >
+                <MarkdownView content={content} />
+              </div>
+            )}
             <div className="flex items-center" style={{ gap: 8, justifyContent: 'flex-end' }}>
               {!editing && (
                 <>
@@ -326,9 +345,15 @@ function ProjectMemory() {
   const [editPath, setEditPath] = useState<string | null>(null);
   const [editContent, setEditContent] = useState('');
   const [editSaved, setEditSaved] = useState('');
+  // 文件查看态：markdown 渲染预览（同一时间一个文件；编辑时收起）
+  const [viewPath, setViewPath] = useState<string | null>(null);
+  const [viewContent, setViewContent] = useState('');
+  const [viewLoading, setViewLoading] = useState(false);
   // 文件重命名态
   const [renamePath, setRenamePath] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
+  // 一键蒸馏进度提示
+  const [distillProgress, setDistillProgress] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     setError(null);
@@ -372,6 +397,36 @@ function ProjectMemory() {
     }
   }, []);
 
+  /** 一键蒸馏：顺序对所有有候选的项目执行 consolidate（逐个跑，进度实时反馈） */
+  const consolidateAll = async () => {
+    const list = (projects ?? []).filter((p) => p.consolidate_candidates > 0);
+    if (list.length === 0) {
+      toast('所有项目都没有蒸馏候选');
+      return;
+    }
+    setBusy('all-distill');
+    setError(null);
+    let ok = 0;
+    const failed: string[] = [];
+    for (let i = 0; i < list.length; i++) {
+      const p = list[i];
+      setDistillProgress(`一键蒸馏中 ${i + 1}/${list.length} · ${p.name}`);
+      try {
+        await projectConsolidate(p.path);
+        ok++;
+      } catch (e) {
+        failed.push(`${p.name}：${e}`);
+      }
+    }
+    setDistillProgress(null);
+    setBusy(null);
+    if (failed.length > 0) {
+      setError(`一键蒸馏部分失败：\n${failed.join('\n')}`);
+    }
+    toast(`一键蒸馏完成：成功 ${ok}/${list.length} 个项目`);
+    await refresh();
+  };
+
   const toggle = (p: ProjectInfo) => {
     if (expanded === p.path) {
       setExpanded(null);
@@ -381,6 +436,7 @@ function ProjectMemory() {
     setExpanded(p.path);
     setFiles(null);
     setEditPath(null);
+    setViewPath(null);
     setRenamePath(null);
     void loadFiles(p.path);
   };
@@ -397,8 +453,27 @@ function ProjectMemory() {
 
   // ── .ai/memory 文件级操作 ──
 
+  /** 点击文件名：展开/收起 markdown 渲染预览 */
+  const toggleView = async (f: MemoryListItem) => {
+    setRenamePath(null);
+    if (viewPath === f.path) {
+      setViewPath(null);
+      return;
+    }
+    setViewPath(f.path);
+    setViewLoading(true);
+    try {
+      setViewContent(await memoryRead(f.path));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setViewLoading(false);
+    }
+  };
+
   const startEdit = async (f: MemoryListItem) => {
     setRenamePath(null);
+    setViewPath(null);
     try {
       const c = await memoryRead(f.path);
       setEditPath(f.path);
@@ -474,7 +549,20 @@ function ProjectMemory() {
           项目记忆（{projects?.length ?? '…'} 个已导入）
         </h5>
         <span style={{ flex: 1 }} />
+        {distillProgress && <span className="chip warn">{distillProgress}</span>}
         {message && <span className="chip ok">{message}</span>}
+        <button
+          className="btn p"
+          onClick={() => void consolidateAll()}
+          disabled={busy !== null || projects === null}
+          title="顺序蒸馏所有有候选的项目，把 .workbuddy/memory/ 自动日志合并进各自 .ai/MEMORY.md"
+        >
+          ⚗ 一键蒸馏
+          {(() => {
+            const total = (projects ?? []).reduce((s, p) => s + p.consolidate_candidates, 0);
+            return total > 0 ? `（${total}）` : '';
+          })()}
+        </button>
         <button className="btn gh" onClick={refresh}>↻ 刷新</button>
         <button className="btn p" onClick={() => void importProject()} disabled={busy !== null}>
           ✦ 导入新项目
@@ -610,8 +698,17 @@ function ProjectMemory() {
                     暂无记忆文件 —— 各 agent 完成实质工作后按 YYYY-MM-DD-memoryTitle.md 规范记入 .ai/memory/
                   </div>
                 )}
-                {files?.map((f) => (
-                  <div key={f.path} style={{ marginBottom: 8 }}>
+                {files && files.length > 0 && (
+                  <div
+                    style={{
+                      maxHeight: 420,
+                      overflowY: 'auto',
+                      overscrollBehavior: 'contain',
+                      paddingRight: 4,
+                    }}
+                  >
+                    {files.map((f) => (
+                      <div key={f.path} style={{ marginBottom: 8 }}>
                     {renamePath === f.path ? (
                       <div className="flex items-center" style={{ gap: 8 }}>
                         <input
@@ -651,9 +748,11 @@ function ProjectMemory() {
                             overflow: 'hidden',
                             textOverflow: 'ellipsis',
                             whiteSpace: 'nowrap',
-                            color: 'var(--color-text-2)',
+                            color: viewPath === f.path ? 'var(--color-primary)' : 'var(--color-text-2)',
+                            cursor: 'pointer',
                           }}
-                          title={f.path}
+                          title="点击查看 / 收起 Markdown 渲染预览（原文路径见下方悬浮提示）"
+                          onClick={() => void toggleView(f)}
                         >
                           {f.name}
                         </div>
@@ -688,6 +787,8 @@ function ProjectMemory() {
                           style={{
                             width: '100%',
                             minHeight: 200,
+                            maxHeight: 420,
+                            overflowY: 'auto',
                             border: '1px solid var(--color-border)',
                             borderRadius: 10,
                             padding: 10,
@@ -717,8 +818,32 @@ function ProjectMemory() {
                         </div>
                       </div>
                     )}
+                    {viewPath === f.path && (
+                      <div
+                        style={{
+                          marginTop: 6,
+                          maxHeight: 420,
+                          overflowY: 'auto',
+                          overscrollBehavior: 'contain',
+                          border: '1px solid var(--color-border)',
+                          borderRadius: 10,
+                          padding: '4px 14px',
+                          background: 'var(--color-surface)',
+                        }}
+                      >
+                        {viewLoading ? (
+                          <div style={{ fontSize: 11.5, color: 'var(--color-text-3)', padding: '8px 0' }}>
+                            加载中…
+                          </div>
+                        ) : (
+                          <MarkdownView content={viewContent} />
+                        )}
+                      </div>
+                    )}
                   </div>
-                ))}
+                    ))}
+                  </div>
+                )}
               </div>
             )}
           </div>
