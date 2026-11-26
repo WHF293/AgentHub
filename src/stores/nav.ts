@@ -17,20 +17,29 @@ export type DefaultPage = 'dashboard' | 'accounts';
 export interface NavItem {
   id: PageId;
   label: string;
+  /** 中文标签（设置页「侧边栏语言」切到中文时显示） */
+  labelZh: string;
   icon: string;
 }
 
 /** 侧栏 8 岛（总览已合并用量页；Architecture / 使用说明走顶栏 icon，不占侧栏） */
 export const NAV_ITEMS: NavItem[] = [
-  { id: 'dashboard', label: 'Usage', icon: '▦' },
-  { id: 'accounts', label: 'Account', icon: '⇄' },
-  { id: 'skills', label: 'Skill', icon: '▤' },
-  { id: 'mcp', label: 'MCP', icon: '⌗' },
-  { id: 'models', label: 'Model', icon: '✦' },
-  { id: 'memory', label: 'Memory', icon: '❑' },
-  { id: 'plugins', label: 'Plugin', icon: '⧉' },
-  { id: 'settings', label: 'Setting', icon: '⚙' },
+  { id: 'dashboard', label: 'Usage', labelZh: '用量管理', icon: '▦' },
+  { id: 'accounts', label: 'Account', labelZh: '账户管理', icon: '⇄' },
+  { id: 'skills', label: 'Skill', labelZh: '技能管理', icon: '▤' },
+  { id: 'mcp', label: 'MCP', labelZh: '连接器管理', icon: '⌗' },
+  { id: 'models', label: 'Model', labelZh: '模型管理', icon: '✦' },
+  { id: 'memory', label: 'Memory', labelZh: '记忆管理', icon: '❑' },
+  { id: 'plugins', label: 'Plugin', labelZh: '插件管理', icon: '⧉' },
+  { id: 'settings', label: 'Setting', labelZh: '设置', icon: '⚙' },
 ];
+
+export type UiLang = 'en' | 'zh';
+const LANG_KEY = 'agenthub.uiLang';
+
+export function getUiLang(): UiLang {
+  return localStorage.getItem(LANG_KEY) === 'zh' ? 'zh' : 'en';
+}
 
 const FIRST_RUN_KEY = 'agenthub.firstRunDone';
 const DEFAULT_PAGE_KEY = 'agenthub.defaultPage';
@@ -61,9 +70,17 @@ export function initialPage(): PageId {
 interface NavState {
   active: PageId;
   setActive: (page: PageId) => void;
+  /** 侧边栏语言（en=英文默认 / zh=中文），localStorage 持久化，设置页切换即时生效 */
+  lang: UiLang;
+  setLang: (lang: UiLang) => void;
 }
 
 export const useNavStore = create<NavState>((set) => ({
   active: initialPage(),
   setActive: (active) => set({ active }),
+  lang: getUiLang(),
+  setLang: (lang) => {
+    localStorage.setItem(LANG_KEY, lang);
+    set({ lang });
+  },
 }));

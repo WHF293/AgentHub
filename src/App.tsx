@@ -55,7 +55,7 @@ function CurrentPage() {
 }
 
 export default function App() {
-  const { active, setActive } = useNavStore();
+  const { active, setActive, lang } = useNavStore();
   // 侧栏收起态（持久化）：收起只显示 icon，hover 浮出文案
   const [collapsed, setCollapsed] = useState(
     () => localStorage.getItem('agenthub.sidebarCollapsed') === '1',
@@ -93,18 +93,22 @@ export default function App() {
             </span>
           </div>
           <nav>
-            {NAV_ITEMS.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                className={`nv${active === item.id ? ' on' : ''}`}
-                data-label={item.label}
-                onClick={() => setActive(item.id)}
-              >
-                <span className="ico">{item.icon}</span>
-                <span className="nv-label">{item.label}</span>
-              </button>
-            ))}
+            {NAV_ITEMS.map((item) => {
+              const label = lang === 'zh' ? item.labelZh : item.label;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  className={`nv${active === item.id ? ' on' : ''}`}
+                  data-label={label}
+                  title={label}
+                  onClick={() => setActive(item.id)}
+                >
+                  <span className="ico">{item.icon}</span>
+                  <span className="nv-label">{label}</span>
+                </button>
+              );
+            })}
           </nav>
           <div className="flex-1" />
           <button

@@ -2,16 +2,17 @@ import { useCallback, useEffect, useState } from 'react';
 import { enable as autostartEnable, disable as autostartDisable, isEnabled as autostartIsEnabled } from '@tauri-apps/plugin-autostart';
 import { invoke } from '@tauri-apps/api/core';
 import { recentOpLog, updateProxyGet, updateProxySet, unbindStatus, unbindRun, unbindReclaim, type OpLogRow, type UnbindReport } from '../api';
-import { getDefaultPage, setDefaultPage, type DefaultPage } from '../stores/nav';
+import { getDefaultPage, setDefaultPage, useNavStore, type DefaultPage, type UiLang } from '../stores/nav';
 import { PageHeader } from '../common/components/PageHeader';
 import { useThemeStore, type ThemeMode } from '../stores/theme';
 import { toast } from '../stores/ui';
 
 const CLOSE_TO_TRAY_KEY = 'agenthub.closeToTray';
 
-/** M8 设置岛：主题 / 开机自启 / 关闭到托盘 / 最近操作 */
+/** M8 设置岛：主题 / 侧边栏语言 / 开机自启 / 关闭到托盘 / 最近操作 */
 export function SettingsPage() {
   const { mode, resolved, setMode } = useThemeStore();
+  const { lang, setLang } = useNavStore();
   const [autostart, setAutostart] = useState(true);
   const [closeToTray, setCloseToTray] = useState<boolean>(
     () => localStorage.getItem(CLOSE_TO_TRAY_KEY) !== '0',
@@ -148,6 +149,31 @@ export function SettingsPage() {
               className={`chip ${mode === m ? 'ok' : 'off'}`}
               style={{ cursor: 'pointer' }}
               onClick={() => setMode(m)}
+            >
+              {label}
+            </span>
+          ))}
+        </div>
+        <div className="li">
+          <div className="ic">文</div>
+          <div className="grow">
+            <div className="nm">侧边栏语言</div>
+            <div className="ds">切换侧边栏八个功能岛的中英文显示（即时生效，本地持久化）</div>
+          </div>
+          {(
+            [
+              ['en', 'English'],
+              ['zh', '中文'],
+            ] as [UiLang, string][]
+          ).map(([v, label]) => (
+            <span
+              key={v}
+              className={`chip ${lang === v ? 'ok' : 'off'}`}
+              style={{ cursor: 'pointer' }}
+              onClick={() => {
+                setLang(v);
+                toast(v === 'zh' ? '侧边栏已切换为中文' : 'Sidebar switched to English');
+              }}
             >
               {label}
             </span>
